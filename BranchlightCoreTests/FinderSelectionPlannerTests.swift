@@ -1,4 +1,5 @@
 import BranchlightCore
+import Foundation
 import XCTest
 
 final class FinderSelectionPlannerTests: XCTestCase {
@@ -69,5 +70,128 @@ final class FinderSelectionPlannerTests: XCTestCase {
             monitoredRoots: [repositoryRoot],
             snapshots: [repositoryRoot: snapshot]
         )
+    }
+}
+
+final class GitRuntimeFoundationTests: XCTestCase {
+    func testCoordinatorSerializesOperationsForSameRepository() async throws {
+        let coordinator = GitOperationCoordinator()
+        let identity = GitRepositoryIdentity(
+            workingTreeRoot: "/tmp/repository",
+            gitDirectory: "/tmp/repository/.git",
+            commonGitDirectory: "/tmp/repository/.git"
+        )
+        let firstEntered = RuntimeSignal()
+        let releaseFirst = RuntimeSignal()
+        let secondEntered = RuntimeSignal()
+
+        let first = Task {
+            try await coordinator.run(repository: identity, label: "first") {
+                await firstEntered.signal()
+                await releaseFirst.wait()
+                return "first"
+            }
+        }
+
+        await firstEntered.wait()
+
+        let second = Task {
+            try await coordinator.run(repository: identity, label: "second") {
+                await secondEntered.signal()
+                return "second"
+            }
+        }
+
+        while await coordinator.queuedOperationCount(for: identity.coordinationKey) == 0 {
+            await Task.yield()
+        }
+
+        let secondWasPremature = await secondEntered.isSignaled
+        XCTAssertFalse(secondWasPremature)
+
+        await releaseFirst.signal()
+        XCTAssertEqual(try await first.value, "first")
+        XCTAssertEqual(try await second.value, "second")
+
+        let records = await coordinator.recentOperations(limit: 2)
+        XCTAssertEqual(records.map(\.label), ["second", "first"])
+        XCTAssertTrue(records.allSatisfy { $0.state == .succeeded && $0.finishedAt != nil })
+    }
+
+    func testLinkedWorktreesShareCoordinationKey() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BranchlightRuntimeTests-\(UUID().uuidString)", isDirectory: true)
+        let repository = tempDirectory.appendingPathComponent("repo", isDirectory: true)
+        let worktree = tempDirectory.appendingPathComponent("feature-worktree", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        try runGit(["init", "-b", "main"], at: repository)
+        try runGit(["config", "user.email", "branchlight-runtime@example.invalid"], at: repository)
+        try runGit(["config", "user.name", "Branchlight Runtime Tests"], at: repository)
+        try "base\n".write(
+            to: repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: repository)
+        try runGit(["commit", "-m", "initial"], at: repository)
+        try runGit(["worktree", "add", "-b", "feature", worktree.path], at: repository)
+
+        let service = InProcessGitService()
+        let primaryIdentity = try await service.repositoryIdentity(at: repository)
+        let worktreeIdentity = try await service.repositoryIdentity(at: worktree)
+
+        XCTAssertNotEqual(primaryIdentity.workingTreeRoot, worktreeIdentity.workingTreeRoot)
+        XCTAssertNotEqual(primaryIdentity.gitDirectory, worktreeIdentity.gitDirectory)
+        XCTAssertEqual(primaryIdentity.commonGitDirectory, worktreeIdentity.commonGitDirectory)
+        XCTAssertEqual(primaryIdentity.coordinationKey, worktreeIdentity.coordinationKey)
+    }
+
+    private func runGit(_ arguments: [String], at directory: URL) throws {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", directory.path] + arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+
+        try process.run()
+        let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let stdoutText = String(data: stdout, encoding: .utf8) ?? ""
+            let stderrText = String(data: stderr, encoding: .utf8) ?? ""
+            XCTFail("git \(arguments.joined(separator: " ")) failed: \(stdoutText) \(stderrText)")
+            throw NSError(domain: "BranchlightRuntimeTests.Git", code: Int(process.terminationStatus))
+        }
+    }
+}
+
+private actor RuntimeSignal {
+    private var signaled = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    var isSignaled: Bool { signaled }
+
+    func wait() async {
+        if signaled { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func signal() {
+        guard !signaled else { return }
+        signaled = true
+        let continuations = waiters
+        waiters.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
     }
 }
