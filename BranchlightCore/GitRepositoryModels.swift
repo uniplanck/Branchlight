@@ -27,10 +27,28 @@ public enum GitRepositoryOperationMode: String, Codable, CaseIterable, Hashable,
     case bisecting
 }
 
+public struct GitAheadBehind: Codable, Hashable, Sendable {
+    public let ahead: Int
+    public let behind: Int
+
+    public init(ahead: Int, behind: Int) {
+        self.ahead = max(0, ahead)
+        self.behind = max(0, behind)
+    }
+
+    public var isSynchronized: Bool { ahead == 0 && behind == 0 }
+    public var isDiverged: Bool { ahead > 0 && behind > 0 }
+
+    public var summary: String {
+        "↑\(ahead) ↓\(behind)"
+    }
+}
+
 public struct GitRepositoryIntelligence: Codable, Hashable, Sendable {
     public let identity: GitRepositoryIdentity
     public let branch: String
     public let upstream: String?
+    public let tracking: GitAheadBehind?
     public let isDetachedHead: Bool
     public let operationMode: GitRepositoryOperationMode
     public let changedCount: Int
@@ -41,11 +59,15 @@ public struct GitRepositoryIntelligence: Codable, Hashable, Sendable {
 
     public var isClean: Bool { changedCount == 0 }
     public var needsConflictResolution: Bool { conflictCount > 0 }
+    public var aheadCount: Int? { tracking?.ahead }
+    public var behindCount: Int? { tracking?.behind }
+    public var hasUpstreamDivergence: Bool { tracking?.isDiverged == true }
 
     public init(
         identity: GitRepositoryIdentity,
         branch: String,
         upstream: String?,
+        tracking: GitAheadBehind? = nil,
         isDetachedHead: Bool,
         operationMode: GitRepositoryOperationMode,
         changedCount: Int,
@@ -57,6 +79,7 @@ public struct GitRepositoryIntelligence: Codable, Hashable, Sendable {
         self.identity = identity
         self.branch = branch
         self.upstream = upstream
+        self.tracking = tracking
         self.isDetachedHead = isDetachedHead
         self.operationMode = operationMode
         self.changedCount = changedCount
@@ -71,6 +94,7 @@ public enum GitOperationState: String, Codable, Hashable, Sendable {
     case running
     case succeeded
     case failed
+    case cancelled
 }
 
 public struct GitOperationRecord: Codable, Hashable, Identifiable, Sendable {
