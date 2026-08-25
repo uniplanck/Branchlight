@@ -22,8 +22,124 @@ public struct GitRepositoryLoad: Sendable {
     }
 }
 
+public actor GitOperationCoordinator {
+    private var activeRepositoryKeys: Set<String> = []
+    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var activeRecords: [UUID: GitOperationRecord] = [:]
+    private var completedRecords: [GitOperationRecord] = []
+    private let maxCompletedRecords: Int
+
+    public init(maxCompletedRecords: Int = 200) {
+        self.maxCompletedRecords = max(1, maxCompletedRecords)
+    }
+
+    public func run<T: Sendable>(
+        repository: GitRepositoryIdentity,
+        label: String,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        let key = repository.coordinationKey
+        await acquire(key)
+
+        let operationID = UUID()
+        let startedAt = Date()
+        activeRecords[operationID] = GitOperationRecord(
+            id: operationID,
+            repository: repository,
+            label: label,
+            state: .running,
+            startedAt: startedAt,
+            finishedAt: nil,
+            errorDescription: nil
+        )
+
+        do {
+            let value = try await operation()
+            finish(
+                operationID: operationID,
+                state: .succeeded,
+                errorDescription: nil
+            )
+            release(key)
+            return value
+        } catch {
+            finish(
+                operationID: operationID,
+                state: .failed,
+                errorDescription: error.localizedDescription
+            )
+            release(key)
+            throw error
+        }
+    }
+
+    public func activeOperations() -> [GitOperationRecord] {
+        activeRecords.values.sorted { $0.startedAt < $1.startedAt }
+    }
+
+    public func recentOperations(limit: Int = 50) -> [GitOperationRecord] {
+        let boundedLimit = min(max(limit, 0), maxCompletedRecords)
+        guard boundedLimit > 0 else { return [] }
+        return Array(completedRecords.suffix(boundedLimit).reversed())
+    }
+
+    public func queuedOperationCount(for coordinationKey: String) -> Int {
+        waiters[coordinationKey]?.count ?? 0
+    }
+
+    private func acquire(_ key: String) async {
+        if activeRepositoryKeys.insert(key).inserted {
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            waiters[key, default: []].append(continuation)
+        }
+    }
+
+    private func release(_ key: String) {
+        guard var queue = waiters[key], !queue.isEmpty else {
+            waiters.removeValue(forKey: key)
+            activeRepositoryKeys.remove(key)
+            return
+        }
+
+        let next = queue.removeFirst()
+        if queue.isEmpty {
+            waiters.removeValue(forKey: key)
+        } else {
+            waiters[key] = queue
+        }
+        next.resume()
+    }
+
+    private func finish(
+        operationID: UUID,
+        state: GitOperationState,
+        errorDescription: String?
+    ) {
+        guard let running = activeRecords.removeValue(forKey: operationID) else { return }
+        completedRecords.append(
+            GitOperationRecord(
+                id: running.id,
+                repository: running.repository,
+                label: running.label,
+                state: state,
+                startedAt: running.startedAt,
+                finishedAt: Date(),
+                errorDescription: errorDescription
+            )
+        )
+
+        if completedRecords.count > maxCompletedRecords {
+            completedRecords.removeFirst(completedRecords.count - maxCompletedRecords)
+        }
+    }
+}
+
 public protocol GitService: Sendable {
     func repositoryRoot(for url: URL) async throws -> URL
+    func repositoryIdentity(at repositoryURL: URL) async throws -> GitRepositoryIdentity
     func loadRepository(at repositoryURL: URL, includeMetadata: Bool, historyLimit: Int) async throws -> GitRepositoryLoad
     func diff(at repositoryURL: URL, paths: [String], staged: Bool) async throws -> String
     func structuredDiff(at repositoryURL: URL, paths: [String], staged: Bool) async throws -> [GitDiffFile]
@@ -51,13 +167,26 @@ public protocol GitService: Sendable {
 
 public struct InProcessGitService: GitService, Sendable {
     private let engine: SystemGitEngine
+    private let coordinator: GitOperationCoordinator
 
-    public init(engine: SystemGitEngine = SystemGitEngine()) {
+    public init(
+        engine: SystemGitEngine = SystemGitEngine(),
+        coordinator: GitOperationCoordinator = GitOperationCoordinator()
+    ) {
         self.engine = engine
+        self.coordinator = coordinator
     }
 
     public func repositoryRoot(for url: URL) async throws -> URL {
-        try await detached { try engine.repositoryRoot(for: url) }
+        let engine = engine
+        return try await detached { try engine.repositoryRoot(for: url) }
+    }
+
+    public func repositoryIdentity(at repositoryURL: URL) async throws -> GitRepositoryIdentity {
+        let engine = engine
+        return try await detached {
+            try Self.resolveRepositoryIdentity(engine: engine, repositoryURL: repositoryURL)
+        }
     }
 
     public func loadRepository(
@@ -65,7 +194,8 @@ public struct InProcessGitService: GitService, Sendable {
         includeMetadata: Bool,
         historyLimit: Int = 30
     ) async throws -> GitRepositoryLoad {
-        try await detached {
+        let engine = engine
+        return try await detached {
             let snapshot = try engine.status(at: repositoryURL)
             return GitRepositoryLoad(
                 snapshot: snapshot,
@@ -78,96 +208,199 @@ public struct InProcessGitService: GitService, Sendable {
     }
 
     public func diff(at repositoryURL: URL, paths: [String], staged: Bool) async throws -> String {
-        try await detached { try engine.diff(at: repositoryURL, paths: paths, staged: staged) }
+        let engine = engine
+        return try await detached { try engine.diff(at: repositoryURL, paths: paths, staged: staged) }
     }
 
     public func structuredDiff(at repositoryURL: URL, paths: [String], staged: Bool) async throws -> [GitDiffFile] {
-        try await detached { try engine.structuredDiff(at: repositoryURL, paths: paths, staged: staged) }
+        let engine = engine
+        return try await detached { try engine.structuredDiff(at: repositoryURL, paths: paths, staged: staged) }
     }
 
     public func stage(at repositoryURL: URL, paths: [String]) async throws {
-        try await detached { try engine.stage(at: repositoryURL, paths: paths) }
+        try await mutate(at: repositoryURL, label: "stage \(paths.count) path(s)") { engine, root in
+            try engine.stage(at: root, paths: paths)
+        }
     }
 
     public func unstage(at repositoryURL: URL, paths: [String]) async throws {
-        try await detached { try engine.unstage(at: repositoryURL, paths: paths) }
+        try await mutate(at: repositoryURL, label: "unstage \(paths.count) path(s)") { engine, root in
+            try engine.unstage(at: root, paths: paths)
+        }
     }
 
     public func applyPatch(at repositoryURL: URL, patch: String, reverse: Bool = false) async throws {
-        try await detached { try engine.applyPatch(at: repositoryURL, patch: patch, reverse: reverse) }
+        try await mutate(at: repositoryURL, label: reverse ? "reverse staged patch" : "apply staged patch") { engine, root in
+            try engine.applyPatch(at: root, patch: patch, reverse: reverse)
+        }
     }
 
     public func commit(at repositoryURL: URL, message: String, amend: Bool) async throws -> GitCommandResult {
-        try await detached { try engine.commit(at: repositoryURL, message: message, amend: amend) }
+        try await mutate(at: repositoryURL, label: amend ? "amend commit" : "commit") { engine, root in
+            try engine.commit(at: root, message: message, amend: amend)
+        }
     }
 
     public func fetch(at repositoryURL: URL) async throws -> GitCommandResult {
-        try await detached { try engine.fetch(at: repositoryURL) }
+        try await mutate(at: repositoryURL, label: "fetch") { engine, root in
+            try engine.fetch(at: root)
+        }
     }
 
     public func pullFastForwardOnly(at repositoryURL: URL) async throws -> GitCommandResult {
-        try await detached { try engine.pullFastForwardOnly(at: repositoryURL) }
+        try await mutate(at: repositoryURL, label: "pull --ff-only") { engine, root in
+            try engine.pullFastForwardOnly(at: root)
+        }
     }
 
     public func push(at repositoryURL: URL) async throws -> GitCommandResult {
-        try await detached { try engine.push(at: repositoryURL) }
+        try await mutate(at: repositoryURL, label: "push") { engine, root in
+            try engine.push(at: root)
+        }
     }
 
     public func branches(at repositoryURL: URL) async throws -> [GitBranch] {
-        try await detached { try engine.branches(at: repositoryURL) }
+        let engine = engine
+        return try await detached { try engine.branches(at: repositoryURL) }
     }
 
     public func switchBranch(at repositoryURL: URL, name: String) async throws {
-        try await detached { try engine.switchBranch(at: repositoryURL, name: name) }
+        try await mutate(at: repositoryURL, label: "switch branch") { engine, root in
+            try engine.switchBranch(at: root, name: name)
+        }
     }
 
     public func history(at repositoryURL: URL, limit: Int) async throws -> [GitCommit] {
-        try await detached { try engine.history(at: repositoryURL, limit: limit) }
+        let engine = engine
+        return try await detached { try engine.history(at: repositoryURL, limit: limit) }
     }
 
     public func fileHistory(at repositoryURL: URL, path: String, limit: Int) async throws -> [GitCommit] {
-        try await detached { try engine.fileHistory(at: repositoryURL, path: path, limit: limit) }
+        let engine = engine
+        return try await detached { try engine.fileHistory(at: repositoryURL, path: path, limit: limit) }
     }
 
     public func blame(at repositoryURL: URL, path: String) async throws -> [GitBlameLine] {
-        try await detached { try engine.blame(at: repositoryURL, path: path) }
+        let engine = engine
+        return try await detached { try engine.blame(at: repositoryURL, path: path) }
     }
 
     public func stashes(at repositoryURL: URL) async throws -> [GitStashEntry] {
-        try await detached { try engine.stashes(at: repositoryURL) }
+        let engine = engine
+        return try await detached { try engine.stashes(at: repositoryURL) }
     }
 
     public func createStash(at repositoryURL: URL, message: String, includeUntracked: Bool) async throws -> GitCommandResult {
-        try await detached { try engine.createStash(at: repositoryURL, message: message, includeUntracked: includeUntracked) }
+        try await mutate(at: repositoryURL, label: "create stash") { engine, root in
+            try engine.createStash(at: root, message: message, includeUntracked: includeUntracked)
+        }
     }
 
     public func applyStash(at repositoryURL: URL, reference: String, pop: Bool) async throws -> GitCommandResult {
-        try await detached { try engine.applyStash(at: repositoryURL, reference: reference, pop: pop) }
+        try await mutate(at: repositoryURL, label: pop ? "pop stash" : "apply stash") { engine, root in
+            try engine.applyStash(at: root, reference: reference, pop: pop)
+        }
     }
 
     public func dropStash(at repositoryURL: URL, reference: String) async throws -> GitCommandResult {
-        try await detached { try engine.dropStash(at: repositoryURL, reference: reference) }
+        try await mutate(at: repositoryURL, label: "drop stash") { engine, root in
+            try engine.dropStash(at: root, reference: reference)
+        }
     }
 
     public func worktrees(at repositoryURL: URL) async throws -> [GitWorktree] {
-        try await detached { try engine.worktrees(at: repositoryURL) }
+        let engine = engine
+        return try await detached { try engine.worktrees(at: repositoryURL) }
     }
 
     public func addWorktree(at repositoryURL: URL, path: URL, branch: String) async throws -> GitCommandResult {
-        try await detached { try engine.addWorktree(at: repositoryURL, path: path, branch: branch) }
+        try await mutate(at: repositoryURL, label: "add worktree") { engine, root in
+            try engine.addWorktree(at: root, path: path, branch: branch)
+        }
     }
 
     public func addWorktree(at repositoryURL: URL, path: URL, newBranch: String, startPoint: String) async throws -> GitCommandResult {
-        try await detached { try engine.addWorktree(at: repositoryURL, path: path, newBranch: newBranch, startPoint: startPoint) }
+        try await mutate(at: repositoryURL, label: "add worktree with branch") { engine, root in
+            try engine.addWorktree(at: root, path: path, newBranch: newBranch, startPoint: startPoint)
+        }
     }
 
     public func removeWorktree(at repositoryURL: URL, path: URL) async throws -> GitCommandResult {
-        try await detached { try engine.removeWorktree(at: repositoryURL, path: path) }
+        try await mutate(at: repositoryURL, label: "remove worktree") { engine, root in
+            try engine.removeWorktree(at: root, path: path)
+        }
+    }
+
+    public func activeOperations() async -> [GitOperationRecord] {
+        await coordinator.activeOperations()
+    }
+
+    public func recentOperations(limit: Int = 50) async -> [GitOperationRecord] {
+        await coordinator.recentOperations(limit: limit)
+    }
+
+    private func mutate<T: Sendable>(
+        at repositoryURL: URL,
+        label: String,
+        operation: @escaping @Sendable (SystemGitEngine, URL) throws -> T
+    ) async throws -> T {
+        let identity = try await repositoryIdentity(at: repositoryURL)
+        let engine = engine
+        return try await coordinator.run(repository: identity, label: label) {
+            try await Task.detached(priority: .userInitiated) {
+                try operation(engine, identity.repositoryURL)
+            }.value
+        }
     }
 
     private func detached<T: Sendable>(
         _ operation: @escaping @Sendable () throws -> T
     ) async throws -> T {
         try await Task.detached(priority: .userInitiated, operation: operation).value
+    }
+
+    private static func resolveRepositoryIdentity(
+        engine: SystemGitEngine,
+        repositoryURL: URL
+    ) throws -> GitRepositoryIdentity {
+        let root = try engine.repositoryRoot(for: repositoryURL).standardizedFileURL
+        let dotGit = root.appendingPathComponent(".git", isDirectory: false)
+        var isDirectory: ObjCBool = false
+
+        guard FileManager.default.fileExists(atPath: dotGit.path, isDirectory: &isDirectory) else {
+            throw GitEngineError.invalidOutput("Repository metadata is missing at \(dotGit.path).")
+        }
+
+        let gitDirectory: URL
+        if isDirectory.boolValue {
+            gitDirectory = dotGit.standardizedFileURL
+        } else {
+            let marker = try String(contentsOf: dotGit, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard marker.hasPrefix("gitdir:") else {
+                throw GitEngineError.invalidOutput("Malformed Git worktree metadata at \(dotGit.path).")
+            }
+
+            let rawPath = marker.dropFirst("gitdir:".count)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !rawPath.isEmpty else {
+                throw GitEngineError.invalidOutput("Git worktree metadata did not contain a git directory.")
+            }
+
+            gitDirectory = rawPath.hasPrefix("/")
+                ? URL(fileURLWithPath: rawPath, isDirectory: true).standardizedFileURL
+                : root.appendingPathComponent(rawPath, isDirectory: true).standardizedFileURL
+        }
+
+        let parent = gitDirectory.deletingLastPathComponent()
+        let commonGitDirectory = parent.lastPathComponent == "worktrees"
+            ? parent.deletingLastPathComponent().standardizedFileURL
+            : gitDirectory
+
+        return GitRepositoryIdentity(
+            workingTreeRoot: root.path,
+            gitDirectory: gitDirectory.path,
+            commonGitDirectory: commonGitDirectory.path
+        )
     }
 }
