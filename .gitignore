@@ -1,0 +1,40 @@
+# macOS
+.DS_Store
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+*.moved-aside
+
+# Build products
+DerivedData/
+build/
+*.app
+*.dSYM
+*.xcresult
+
+# SwiftPM
+.swiftpm/
+.build/
+Package.resolved
+
+# Local signing / provisioning
+*.mobileprovision
+*.provisionprofile
+*.cer
+*.p12
+*.entitlements.local
+
+# Local environment / editor settings
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.swp
+*~

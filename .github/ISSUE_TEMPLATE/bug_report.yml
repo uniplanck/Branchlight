@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a reproducible Branchlight problem.
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Branchlight. Please avoid testing against a repository containing irreplaceable uncommitted work when reproducing Git mutation bugs.
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "e.g. macOS 15.x"
+    validations:
+      required: true
+  - type: input
+    id: branchlight
+    attributes:
+      label: Branchlight version / commit
+      placeholder: "e.g. main @ abc1234"
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Area
+      options:
+        - Finder badges / menus
+        - Changes / staging
+        - Interactive diff
+        - History / blame
+        - Stash
+        - Branches / worktrees
+        - Fetch / pull / push
+        - Build / signing
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Include the smallest Git state that reproduces the issue.
+      placeholder: |
+        1. Open repository...
+        2. Modify...
+        3. Select...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: Logs, screenshots, File Provider location, detached-HEAD/worktree state, or other useful details.

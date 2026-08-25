@@ -1,0 +1,759 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0473F32B23EC840D77D7A0A0 /* GitDiffParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91C5FBC4FC3F51D793C87D7C /* GitDiffParserTests.swift */; };
+		0781C2E62F1825526EE450D2 /* PorcelainStatusParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F9F442012AB6FF6774DF15E /* PorcelainStatusParserTests.swift */; };
+		1740E504B0240E5A28A8D221 /* GitDiff.swift in Sources */ = {isa = PBXBuildFile; fileRef = 964A9B624D816C7B1389D711 /* GitDiff.swift */; };
+		2EBF695CE8A5151D1B881E21 /* GitService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42AFB7349B05C0B1B9A4275A /* GitService.swift */; };
+		3C5B18F2D10C1946BA28861E /* SharedStatusCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70E9A388AC465D9D486CD6CB /* SharedStatusCacheTests.swift */; };
+		5450CFC9A1606DB50EAF8C50 /* FinderSelectionPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6714136B01DBF326741EA5E /* FinderSelectionPlannerTests.swift */; };
+		6B93AD4607A52B3AED91C906 /* RepositoryWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DD4718B947893EBEC048F45 /* RepositoryWatcher.swift */; };
+		721CAA60F7DC1C8543E93EFA /* FinderSelectionPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38C2707E38C9FA1F13BB414B /* FinderSelectionPlanner.swift */; };
+		7A0C57A4F807C1FF0DBB2036 /* FinderSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87EB3020F153CAD0DFCB05E3 /* FinderSync.swift */; };
+		7C10D0944B3714B32A3F8654 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD25953BBA7D2F8E80458678 /* ContentView.swift */; };
+		83646836698CF3664C95FFE3 /* BranchlightCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A6758ED5CE5B4A8343FB33C7 /* BranchlightCore.framework */; };
+		8DAA81DA5471857BA5FC3B5A /* GitEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3975B631D1598AA6F7BE2D16 /* GitEngine.swift */; };
+		9FEAE8B1582AB73357950F8F /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 582B2946D86B0442D0144B5F /* AppModel.swift */; };
+		A7CDEDAA963D70940D0AC326 /* BranchlightCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A6758ED5CE5B4A8343FB33C7 /* BranchlightCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		AB117BF4BD76D20D5E18CE33 /* BranchlightCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A6758ED5CE5B4A8343FB33C7 /* BranchlightCore.framework */; };
+		AE8F0C6414791279E5A779BC /* BranchlightCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A6758ED5CE5B4A8343FB33C7 /* BranchlightCore.framework */; };
+		AEBDF811730308B0C3792D2F /* GitStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39E78EDCBD9247703E058F1F /* GitStatus.swift */; };
+		AF8338A465F9875201EEA907 /* GitRepositoryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E5C5235FB3D50F84CAC22EC /* GitRepositoryModels.swift */; };
+		B776AFA9578F9121A9D2C3B1 /* SharedStatusCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A10BBFCDC5A15E4CF149D05 /* SharedStatusCache.swift */; };
+		BAAF078847E00388B760DE9E /* HostStatusCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0150C763514BCD02F8A23632 /* HostStatusCache.swift */; };
+		CA2C236F24F3920F9B606568 /* PorcelainStatusParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8106F06A1F1C9EED6C3815F4 /* PorcelainStatusParser.swift */; };
+		D419B29C92154D0DA7D674D2 /* SystemGitEngineIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 321066EACFF76FFAEF13F748 /* SystemGitEngineIntegrationTests.swift */; };
+		D9A4877EEBD2525051A2EB9A /* BranchlightCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A6758ED5CE5B4A8343FB33C7 /* BranchlightCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		EAB1532FE6EFB0C5EE19DD32 /* BranchlightFinderExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 4349E7E10C4EB0D707CCED75 /* BranchlightFinderExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		FD0B7B8A20D79AF8BF9740D3 /* BranchlightApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B7CC5BCE16D60D7E13C546C /* BranchlightApp.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		3748E3291AC61866FE845AF7 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6CE6EFBA071F18BEC7F57090 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = EE73BAB08975FD58367E1F1E;
+			remoteInfo = BranchlightCore;
+		};
+		425A445A3495BE910ECE596E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6CE6EFBA071F18BEC7F57090 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 658849D6EBF707D09D1876F3;
+			remoteInfo = BranchlightFinderExtension;
+		};
+		6481C015D936005011FDC8CA /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6CE6EFBA071F18BEC7F57090 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = EE73BAB08975FD58367E1F1E;
+			remoteInfo = BranchlightCore;
+		};
+		C458A994A9B16863400E6B6C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6CE6EFBA071F18BEC7F57090 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = EE73BAB08975FD58367E1F1E;
+			remoteInfo = BranchlightCore;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		01910284BF9C982BECB64A20 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				EAB1532FE6EFB0C5EE19DD32 /* BranchlightFinderExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		37B0C5B2B237975192CFC1CB /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				D9A4877EEBD2525051A2EB9A /* BranchlightCore.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4E4E2A4B3FBAB9F000F8E30A /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				A7CDEDAA963D70940D0AC326 /* BranchlightCore.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		0150C763514BCD02F8A23632 /* HostStatusCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostStatusCache.swift; sourceTree = "<group>"; };
+		0DD4718B947893EBEC048F45 /* RepositoryWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryWatcher.swift; sourceTree = "<group>"; };
+		0E5C5235FB3D50F84CAC22EC /* GitRepositoryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitRepositoryModels.swift; sourceTree = "<group>"; };
+		2A10BBFCDC5A15E4CF149D05 /* SharedStatusCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedStatusCache.swift; sourceTree = "<group>"; };
+		2F9F442012AB6FF6774DF15E /* PorcelainStatusParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PorcelainStatusParserTests.swift; sourceTree = "<group>"; };
+		321066EACFF76FFAEF13F748 /* SystemGitEngineIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemGitEngineIntegrationTests.swift; sourceTree = "<group>"; };
+		38C2707E38C9FA1F13BB414B /* FinderSelectionPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderSelectionPlanner.swift; sourceTree = "<group>"; };
+		3975B631D1598AA6F7BE2D16 /* GitEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitEngine.swift; sourceTree = "<group>"; };
+		39E78EDCBD9247703E058F1F /* GitStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitStatus.swift; sourceTree = "<group>"; };
+		42AFB7349B05C0B1B9A4275A /* GitService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitService.swift; sourceTree = "<group>"; };
+		4349E7E10C4EB0D707CCED75 /* BranchlightFinderExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BranchlightFinderExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		50F1E35FBEFCEE2C595B5942 /* BranchlightCoreTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BranchlightCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		582B2946D86B0442D0144B5F /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		6B7CC5BCE16D60D7E13C546C /* BranchlightApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BranchlightApp.swift; sourceTree = "<group>"; };
+		6C9E562626F2BC67D4024689 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		70E9A388AC465D9D486CD6CB /* SharedStatusCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedStatusCacheTests.swift; sourceTree = "<group>"; };
+		8106F06A1F1C9EED6C3815F4 /* PorcelainStatusParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PorcelainStatusParser.swift; sourceTree = "<group>"; };
+		87EB3020F153CAD0DFCB05E3 /* FinderSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderSync.swift; sourceTree = "<group>"; };
+		91C5FBC4FC3F51D793C87D7C /* GitDiffParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitDiffParserTests.swift; sourceTree = "<group>"; };
+		925D5056BC4E28F9BE53D605 /* Branchlight.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Branchlight.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		964A9B624D816C7B1389D711 /* GitDiff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitDiff.swift; sourceTree = "<group>"; };
+		A6758ED5CE5B4A8343FB33C7 /* BranchlightCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = BranchlightCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA62B238CC358CD1D1CFC4C4 /* BranchlightFinderExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BranchlightFinderExtension.entitlements; sourceTree = "<group>"; };
+		B43B22610245092DA230B026 /* BranchlightHost.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BranchlightHost.entitlements; sourceTree = "<group>"; };
+		B6714136B01DBF326741EA5E /* FinderSelectionPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderSelectionPlannerTests.swift; sourceTree = "<group>"; };
+		C384F8163DABE50B45081C0C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		FD25953BBA7D2F8E80458678 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		3EA8B8CABDE96212885CC7BD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AB117BF4BD76D20D5E18CE33 /* BranchlightCore.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		55AFF93596BED3C315BB5798 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AE8F0C6414791279E5A779BC /* BranchlightCore.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A9E138AD50A7A753F8EFA304 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				83646836698CF3664C95FFE3 /* BranchlightCore.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		4C6E6D844A3CF0C231B6C354 /* BranchlightCore */ = {
+			isa = PBXGroup;
+			children = (
+				38C2707E38C9FA1F13BB414B /* FinderSelectionPlanner.swift */,
+				964A9B624D816C7B1389D711 /* GitDiff.swift */,
+				3975B631D1598AA6F7BE2D16 /* GitEngine.swift */,
+				0E5C5235FB3D50F84CAC22EC /* GitRepositoryModels.swift */,
+				42AFB7349B05C0B1B9A4275A /* GitService.swift */,
+				39E78EDCBD9247703E058F1F /* GitStatus.swift */,
+				8106F06A1F1C9EED6C3815F4 /* PorcelainStatusParser.swift */,
+				2A10BBFCDC5A15E4CF149D05 /* SharedStatusCache.swift */,
+			);
+			path = BranchlightCore;
+			sourceTree = "<group>";
+		};
+		820B66D7D10E242AA99704DD /* BranchlightCoreTests */ = {
+			isa = PBXGroup;
+			children = (
+				B6714136B01DBF326741EA5E /* FinderSelectionPlannerTests.swift */,
+				91C5FBC4FC3F51D793C87D7C /* GitDiffParserTests.swift */,
+				2F9F442012AB6FF6774DF15E /* PorcelainStatusParserTests.swift */,
+				70E9A388AC465D9D486CD6CB /* SharedStatusCacheTests.swift */,
+				321066EACFF76FFAEF13F748 /* SystemGitEngineIntegrationTests.swift */,
+			);
+			path = BranchlightCoreTests;
+			sourceTree = "<group>";
+		};
+		AE7E127208D21AB790094739 = {
+			isa = PBXGroup;
+			children = (
+				4C6E6D844A3CF0C231B6C354 /* BranchlightCore */,
+				820B66D7D10E242AA99704DD /* BranchlightCoreTests */,
+				DCDEE13B2E4387AABE025B29 /* BranchlightFinderExtension */,
+				E62D57B5649F43131D6A3351 /* BranchlightHost */,
+				DC54AFB6DDC18D10C0DB4B3E /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		DC54AFB6DDC18D10C0DB4B3E /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				925D5056BC4E28F9BE53D605 /* Branchlight.app */,
+				A6758ED5CE5B4A8343FB33C7 /* BranchlightCore.framework */,
+				50F1E35FBEFCEE2C595B5942 /* BranchlightCoreTests.xctest */,
+				4349E7E10C4EB0D707CCED75 /* BranchlightFinderExtension.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		DCDEE13B2E4387AABE025B29 /* BranchlightFinderExtension */ = {
+			isa = PBXGroup;
+			children = (
+				AA62B238CC358CD1D1CFC4C4 /* BranchlightFinderExtension.entitlements */,
+				87EB3020F153CAD0DFCB05E3 /* FinderSync.swift */,
+				C384F8163DABE50B45081C0C /* Info.plist */,
+			);
+			path = BranchlightFinderExtension;
+			sourceTree = "<group>";
+		};
+		E62D57B5649F43131D6A3351 /* BranchlightHost */ = {
+			isa = PBXGroup;
+			children = (
+				582B2946D86B0442D0144B5F /* AppModel.swift */,
+				6B7CC5BCE16D60D7E13C546C /* BranchlightApp.swift */,
+				B43B22610245092DA230B026 /* BranchlightHost.entitlements */,
+				FD25953BBA7D2F8E80458678 /* ContentView.swift */,
+				0150C763514BCD02F8A23632 /* HostStatusCache.swift */,
+				6C9E562626F2BC67D4024689 /* Info.plist */,
+				0DD4718B947893EBEC048F45 /* RepositoryWatcher.swift */,
+			);
+			path = BranchlightHost;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		06C2C1CFDA77711893EC9077 /* BranchlightCoreTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 80646A1B5FE7B589F134CFFE /* Build configuration list for PBXNativeTarget "BranchlightCoreTests" */;
+			buildPhases = (
+				A30CE3A86191CE079CE4007D /* Sources */,
+				55AFF93596BED3C315BB5798 /* Frameworks */,
+				37B0C5B2B237975192CFC1CB /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				3E3C5F17313793370309C729 /* PBXTargetDependency */,
+			);
+			name = BranchlightCoreTests;
+			packageProductDependencies = (
+			);
+			productName = BranchlightCoreTests;
+			productReference = 50F1E35FBEFCEE2C595B5942 /* BranchlightCoreTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		658849D6EBF707D09D1876F3 /* BranchlightFinderExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5F04B69560C20AD0C5996CE7 /* Build configuration list for PBXNativeTarget "BranchlightFinderExtension" */;
+			buildPhases = (
+				F32CF0AD48CAD0976B2A1142 /* Sources */,
+				A9E138AD50A7A753F8EFA304 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				944C123609902124856C642D /* PBXTargetDependency */,
+			);
+			name = BranchlightFinderExtension;
+			packageProductDependencies = (
+			);
+			productName = BranchlightFinderExtension;
+			productReference = 4349E7E10C4EB0D707CCED75 /* BranchlightFinderExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		EE73BAB08975FD58367E1F1E /* BranchlightCore */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 62101396E007B05F007C1B45 /* Build configuration list for PBXNativeTarget "BranchlightCore" */;
+			buildPhases = (
+				D954B2F63ADFC314DC9BC71F /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BranchlightCore;
+			packageProductDependencies = (
+			);
+			productName = BranchlightCore;
+			productReference = A6758ED5CE5B4A8343FB33C7 /* BranchlightCore.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		FD547321064F87624EF5CF79 /* Branchlight */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F5AFFC8B8CA61576141729B4 /* Build configuration list for PBXNativeTarget "Branchlight" */;
+			buildPhases = (
+				7CE6DB5536E231A086291A51 /* Sources */,
+				3EA8B8CABDE96212885CC7BD /* Frameworks */,
+				01910284BF9C982BECB64A20 /* Embed Foundation Extensions */,
+				4E4E2A4B3FBAB9F000F8E30A /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				48CF006E8D8997432F3DDB15 /* PBXTargetDependency */,
+				07DA992A7F95E12CDC7CE6BB /* PBXTargetDependency */,
+			);
+			name = Branchlight;
+			packageProductDependencies = (
+			);
+			productName = Branchlight;
+			productReference = 925D5056BC4E28F9BE53D605 /* Branchlight.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		6CE6EFBA071F18BEC7F57090 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					06C2C1CFDA77711893EC9077 = {
+						ProvisioningStyle = Automatic;
+					};
+					658849D6EBF707D09D1876F3 = {
+						ProvisioningStyle = Automatic;
+					};
+					EE73BAB08975FD58367E1F1E = {
+						ProvisioningStyle = Automatic;
+					};
+					FD547321064F87624EF5CF79 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 10632D9570016808D9D5060C /* Build configuration list for PBXProject "Branchlight" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = AE7E127208D21AB790094739;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				FD547321064F87624EF5CF79 /* Branchlight */,
+				EE73BAB08975FD58367E1F1E /* BranchlightCore */,
+				06C2C1CFDA77711893EC9077 /* BranchlightCoreTests */,
+				658849D6EBF707D09D1876F3 /* BranchlightFinderExtension */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		7CE6DB5536E231A086291A51 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9FEAE8B1582AB73357950F8F /* AppModel.swift in Sources */,
+				FD0B7B8A20D79AF8BF9740D3 /* BranchlightApp.swift in Sources */,
+				7C10D0944B3714B32A3F8654 /* ContentView.swift in Sources */,
+				BAAF078847E00388B760DE9E /* HostStatusCache.swift in Sources */,
+				6B93AD4607A52B3AED91C906 /* RepositoryWatcher.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A30CE3A86191CE079CE4007D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5450CFC9A1606DB50EAF8C50 /* FinderSelectionPlannerTests.swift in Sources */,
+				0473F32B23EC840D77D7A0A0 /* GitDiffParserTests.swift in Sources */,
+				0781C2E62F1825526EE450D2 /* PorcelainStatusParserTests.swift in Sources */,
+				3C5B18F2D10C1946BA28861E /* SharedStatusCacheTests.swift in Sources */,
+				D419B29C92154D0DA7D674D2 /* SystemGitEngineIntegrationTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D954B2F63ADFC314DC9BC71F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				721CAA60F7DC1C8543E93EFA /* FinderSelectionPlanner.swift in Sources */,
+				1740E504B0240E5A28A8D221 /* GitDiff.swift in Sources */,
+				8DAA81DA5471857BA5FC3B5A /* GitEngine.swift in Sources */,
+				AF8338A465F9875201EEA907 /* GitRepositoryModels.swift in Sources */,
+				2EBF695CE8A5151D1B881E21 /* GitService.swift in Sources */,
+				AEBDF811730308B0C3792D2F /* GitStatus.swift in Sources */,
+				CA2C236F24F3920F9B606568 /* PorcelainStatusParser.swift in Sources */,
+				B776AFA9578F9121A9D2C3B1 /* SharedStatusCache.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F32CF0AD48CAD0976B2A1142 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7A0C57A4F807C1FF0DBB2036 /* FinderSync.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		07DA992A7F95E12CDC7CE6BB /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 658849D6EBF707D09D1876F3 /* BranchlightFinderExtension */;
+			targetProxy = 425A445A3495BE910ECE596E /* PBXContainerItemProxy */;
+		};
+		3E3C5F17313793370309C729 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = EE73BAB08975FD58367E1F1E /* BranchlightCore */;
+			targetProxy = 3748E3291AC61866FE845AF7 /* PBXContainerItemProxy */;
+		};
+		48CF006E8D8997432F3DDB15 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = EE73BAB08975FD58367E1F1E /* BranchlightCore */;
+			targetProxy = C458A994A9B16863400E6B6C /* PBXContainerItemProxy */;
+		};
+		944C123609902124856C642D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = EE73BAB08975FD58367E1F1E /* BranchlightCore */;
+			targetProxy = 6481C015D936005011FDC8CA /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		6D47712D02B7B6DF0F005F69 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.uniplanck.Branchlight.CoreTests;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		789954B70814B600841E93AD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = BranchlightFinderExtension/BranchlightFinderExtension.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = BranchlightFinderExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.uniplanck.Branchlight.Extension;
+				PRODUCT_NAME = BranchlightFinderExtension;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		83580C8AC336C8879BBB81A8 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.uniplanck.Branchlight.CoreTests;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		9B363F3F77C5760AD02CF0EF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = BranchlightFinderExtension/BranchlightFinderExtension.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = BranchlightFinderExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.uniplanck.Branchlight.Extension;
+				PRODUCT_NAME = BranchlightFinderExtension;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		9D5136F04395132800F5B277 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.uniplanck.Branchlight.Core;
+				PRODUCT_NAME = BranchlightCore;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Debug;
+		};
+		A09F55CCA41C8BFD6B96AA55 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.uniplanck.Branchlight.Core;
+				PRODUCT_NAME = BranchlightCore;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Release;
+		};
+		B82E3F2F4031CAA7ECAC43DA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = BranchlightHost/BranchlightHost.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = BranchlightHost/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.uniplanck.Branchlight;
+				PRODUCT_NAME = Branchlight;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		D4CF1729CC9534277FA0F831 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		E2BC1B34C2B885D36D32AAB7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		EAF23715BFA98B618C10ECB8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = BranchlightHost/BranchlightHost.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = BranchlightHost/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.uniplanck.Branchlight;
+				PRODUCT_NAME = Branchlight;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		10632D9570016808D9D5060C /* Build configuration list for PBXProject "Branchlight" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E2BC1B34C2B885D36D32AAB7 /* Debug */,
+				D4CF1729CC9534277FA0F831 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		5F04B69560C20AD0C5996CE7 /* Build configuration list for PBXNativeTarget "BranchlightFinderExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9B363F3F77C5760AD02CF0EF /* Debug */,
+				789954B70814B600841E93AD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		62101396E007B05F007C1B45 /* Build configuration list for PBXNativeTarget "BranchlightCore" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9D5136F04395132800F5B277 /* Debug */,
+				A09F55CCA41C8BFD6B96AA55 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		80646A1B5FE7B589F134CFFE /* Build configuration list for PBXNativeTarget "BranchlightCoreTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6D47712D02B7B6DF0F005F69 /* Debug */,
+				83580C8AC336C8879BBB81A8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F5AFFC8B8CA61576141729B4 /* Build configuration list for PBXNativeTarget "Branchlight" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EAF23715BFA98B618C10ECB8 /* Debug */,
+				B82E3F2F4031CAA7ECAC43DA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 6CE6EFBA071F18BEC7F57090 /* Project object */;
+}

@@ -1,0 +1,92 @@
+name: Branchlight
+options:
+  bundleIdPrefix: com.uniplanck
+  deploymentTarget:
+    macOS: "13.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    CODE_SIGN_STYLE: Automatic
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+targets:
+  BranchlightCore:
+    type: framework
+    platform: macOS
+    sources:
+      - path: BranchlightCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight.Core
+        PRODUCT_NAME: BranchlightCore
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+
+  Branchlight:
+    type: application
+    platform: macOS
+    sources:
+      - path: BranchlightHost
+    info:
+      path: BranchlightHost/Info.plist
+      properties:
+        CFBundleDisplayName: Branchlight
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSPrincipalClass: NSApplication
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight
+        PRODUCT_NAME: Branchlight
+        CODE_SIGN_ENTITLEMENTS: BranchlightHost/BranchlightHost.entitlements
+    dependencies:
+      - target: BranchlightCore
+      - target: BranchlightFinderExtension
+        embed: true
+
+  BranchlightFinderExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: BranchlightFinderExtension
+    info:
+      path: BranchlightFinderExtension/Info.plist
+      properties:
+        CFBundleDisplayName: Branchlight Finder Extension
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionAttributes: {}
+          NSExtensionPointIdentifier: com.apple.FinderSync
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).FinderSync
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight.Extension
+        PRODUCT_NAME: BranchlightFinderExtension
+        CODE_SIGN_ENTITLEMENTS: BranchlightFinderExtension/BranchlightFinderExtension.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+    dependencies:
+      - target: BranchlightCore
+
+  BranchlightCoreTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: BranchlightCoreTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight.CoreTests
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: BranchlightCore
+
+schemes:
+  Branchlight:
+    build:
+      targets:
+        Branchlight: all
+        BranchlightCoreTests: [test]
+    test:
+      targets:
+        - BranchlightCoreTests
