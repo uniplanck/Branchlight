@@ -55,19 +55,11 @@ public actor GitOperationCoordinator {
 
         do {
             let value = try await operation()
-            finish(
-                operationID: operationID,
-                state: .succeeded,
-                errorDescription: nil
-            )
+            finish(operationID: operationID, state: .succeeded, errorDescription: nil)
             release(key)
             return value
         } catch {
-            finish(
-                operationID: operationID,
-                state: .failed,
-                errorDescription: error.localizedDescription
-            )
+            finish(operationID: operationID, state: .failed, errorDescription: error.localizedDescription)
             release(key)
             throw error
         }
@@ -88,10 +80,7 @@ public actor GitOperationCoordinator {
     }
 
     private func acquire(_ key: String) async {
-        if activeRepositoryKeys.insert(key).inserted {
-            return
-        }
-
+        if activeRepositoryKeys.insert(key).inserted { return }
         await withCheckedContinuation { continuation in
             waiters[key, default: []].append(continuation)
         }
@@ -113,11 +102,7 @@ public actor GitOperationCoordinator {
         next.resume()
     }
 
-    private func finish(
-        operationID: UUID,
-        state: GitOperationState,
-        errorDescription: String?
-    ) {
+    private func finish(operationID: UUID, state: GitOperationState, errorDescription: String?) {
         guard let running = activeRecords.removeValue(forKey: operationID) else { return }
         completedRecords.append(
             GitOperationRecord(
@@ -130,7 +115,6 @@ public actor GitOperationCoordinator {
                 errorDescription: errorDescription
             )
         )
-
         if completedRecords.count > maxCompletedRecords {
             completedRecords.removeFirst(completedRecords.count - maxCompletedRecords)
         }
@@ -161,15 +145,14 @@ public actor GitRepositoryRegistry {
     public func repositories(sharingCoordinationKey coordinationKey: String) -> [GitRepositoryIdentity] {
         repositoriesByWorkingTreeRoot.values
             .filter { $0.coordinationKey == coordinationKey }
-            .sorted {
-                $0.workingTreeRoot.localizedStandardCompare($1.workingTreeRoot) == .orderedAscending
-            }
+            .sorted { $0.workingTreeRoot.localizedStandardCompare($1.workingTreeRoot) == .orderedAscending }
     }
 }
 
 public protocol GitService: Sendable {
     func repositoryRoot(for url: URL) async throws -> URL
     func repositoryIdentity(at repositoryURL: URL) async throws -> GitRepositoryIdentity
+    func repositoryIntelligence(at repositoryURL: URL) async throws -> GitRepositoryIntelligence
     func loadRepository(at repositoryURL: URL, includeMetadata: Bool, historyLimit: Int) async throws -> GitRepositoryLoad
     func diff(at repositoryURL: URL, paths: [String], staged: Bool) async throws -> String
     func structuredDiff(at repositoryURL: URL, paths: [String], staged: Bool) async throws -> [GitDiffFile]
@@ -222,6 +205,30 @@ public struct InProcessGitService: GitService, Sendable {
         }
         await registry.register(identity)
         return identity
+    }
+
+    public func repositoryIntelligence(at repositoryURL: URL) async throws -> GitRepositoryIntelligence {
+        let identity = try await repositoryIdentity(at: repositoryURL)
+        let engine = engine
+        return try await detached {
+            let snapshot = try engine.status(at: identity.repositoryURL)
+            let branches = try engine.branches(at: identity.repositoryURL)
+            let upstream = branches.first(where: { $0.isCurrent })?.upstream
+            let operationMode = Self.detectOperationMode(identity: identity)
+
+            return GitRepositoryIntelligence(
+                identity: identity,
+                branch: snapshot.branch,
+                upstream: upstream,
+                isDetachedHead: snapshot.isDetachedHead,
+                operationMode: operationMode,
+                changedCount: snapshot.paths.count,
+                stagedCount: snapshot.paths.count(where: { $0.isStaged }),
+                untrackedCount: snapshot.paths.count(where: { $0.kind == .untracked }),
+                conflictCount: snapshot.paths.count(where: { $0.kind == .conflicted }),
+                capturedAt: snapshot.capturedAt
+            )
+        }
     }
 
     public func loadRepository(
@@ -278,9 +285,7 @@ public struct InProcessGitService: GitService, Sendable {
     }
 
     public func fetch(at repositoryURL: URL) async throws -> GitCommandResult {
-        try await mutate(at: repositoryURL, label: "fetch") { engine, root in
-            try engine.fetch(at: root)
-        }
+        try await mutate(at: repositoryURL, label: "fetch") { engine, root in try engine.fetch(at: root) }
     }
 
     public func pullFastForwardOnly(at repositoryURL: URL) async throws -> GitCommandResult {
@@ -290,9 +295,7 @@ public struct InProcessGitService: GitService, Sendable {
     }
 
     public func push(at repositoryURL: URL) async throws -> GitCommandResult {
-        try await mutate(at: repositoryURL, label: "push") { engine, root in
-            try engine.push(at: root)
-        }
+        try await mutate(at: repositoryURL, label: "push") { engine, root in try engine.push(at: root) }
     }
 
     public func branches(at repositoryURL: URL) async throws -> [GitBranch] {
@@ -420,13 +423,10 @@ public struct InProcessGitService: GitService, Sendable {
             guard marker.hasPrefix("gitdir:") else {
                 throw GitEngineError.invalidOutput("Malformed Git worktree metadata at \(dotGit.path).")
             }
-
-            let rawPath = marker.dropFirst("gitdir:".count)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawPath = marker.dropFirst("gitdir:".count).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !rawPath.isEmpty else {
                 throw GitEngineError.invalidOutput("Git worktree metadata did not contain a git directory.")
             }
-
             gitDirectory = rawPath.hasPrefix("/")
                 ? URL(fileURLWithPath: rawPath, isDirectory: true).standardizedFileURL
                 : root.appendingPathComponent(rawPath, isDirectory: true).standardizedFileURL
@@ -442,5 +442,23 @@ public struct InProcessGitService: GitService, Sendable {
             gitDirectory: gitDirectory.path,
             commonGitDirectory: commonGitDirectory.path
         )
+    }
+
+    private static func detectOperationMode(identity: GitRepositoryIdentity) -> GitRepositoryOperationMode {
+        let fileManager = FileManager.default
+        let gitDirectory = URL(fileURLWithPath: identity.gitDirectory, isDirectory: true)
+        let commonDirectory = URL(fileURLWithPath: identity.commonGitDirectory, isDirectory: true)
+        let roots = gitDirectory.path == commonDirectory.path ? [gitDirectory] : [gitDirectory, commonDirectory]
+
+        func exists(_ relativePath: String) -> Bool {
+            roots.contains { fileManager.fileExists(atPath: $0.appendingPathComponent(relativePath).path) }
+        }
+
+        if exists("rebase-merge") || exists("rebase-apply") { return .rebasing }
+        if exists("MERGE_HEAD") { return .merging }
+        if exists("CHERRY_PICK_HEAD") { return .cherryPicking }
+        if exists("REVERT_HEAD") { return .reverting }
+        if exists("BISECT_START") { return .bisecting }
+        return .normal
     }
 }
