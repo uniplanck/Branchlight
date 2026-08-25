@@ -110,8 +110,10 @@ final class GitRuntimeFoundationTests: XCTestCase {
         XCTAssertFalse(secondWasPremature)
 
         await releaseFirst.signal()
-        XCTAssertEqual(try await first.value, "first")
-        XCTAssertEqual(try await second.value, "second")
+        let firstValue = try await first.value
+        let secondValue = try await second.value
+        XCTAssertEqual(firstValue, "first")
+        XCTAssertEqual(secondValue, "second")
 
         let records = await coordinator.recentOperations(limit: 2)
         XCTAssertEqual(records.map(\.label), ["second", "first"])
