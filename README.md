@@ -1,6 +1,10 @@
 # Branchlight
 
 <p align="center">
+  <a href="README.md"><strong>English</strong></a> | <a href="README.ja.md">日本語</a>
+</p>
+
+<p align="center">
   <strong>Git belongs in Finder.</strong>
 </p>
 
