@@ -18,6 +18,55 @@ public struct GitRepositoryIdentity: Codable, Hashable, Sendable {
     }
 }
 
+public enum GitRepositoryOperationMode: String, Codable, CaseIterable, Hashable, Sendable {
+    case normal
+    case merging
+    case rebasing
+    case cherryPicking
+    case reverting
+    case bisecting
+}
+
+public struct GitRepositoryIntelligence: Codable, Hashable, Sendable {
+    public let identity: GitRepositoryIdentity
+    public let branch: String
+    public let upstream: String?
+    public let isDetachedHead: Bool
+    public let operationMode: GitRepositoryOperationMode
+    public let changedCount: Int
+    public let stagedCount: Int
+    public let untrackedCount: Int
+    public let conflictCount: Int
+    public let capturedAt: Date
+
+    public var isClean: Bool { changedCount == 0 }
+    public var needsConflictResolution: Bool { conflictCount > 0 }
+
+    public init(
+        identity: GitRepositoryIdentity,
+        branch: String,
+        upstream: String?,
+        isDetachedHead: Bool,
+        operationMode: GitRepositoryOperationMode,
+        changedCount: Int,
+        stagedCount: Int,
+        untrackedCount: Int,
+        conflictCount: Int,
+        capturedAt: Date = Date()
+    ) {
+        self.identity = identity
+        self.branch = branch
+        self.upstream = upstream
+        self.isDetachedHead = isDetachedHead
+        self.operationMode = operationMode
+        self.changedCount = changedCount
+        self.stagedCount = stagedCount
+        self.untrackedCount = untrackedCount
+        self.conflictCount = conflictCount
+        self.capturedAt = capturedAt
+    }
+}
+
 public enum GitOperationState: String, Codable, Hashable, Sendable {
     case running
     case succeeded
