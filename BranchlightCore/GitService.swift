@@ -137,6 +137,36 @@ public actor GitOperationCoordinator {
     }
 }
 
+public actor GitRepositoryRegistry {
+    private var repositoriesByWorkingTreeRoot: [String: GitRepositoryIdentity] = [:]
+
+    public init() {}
+
+    @discardableResult
+    public func register(_ repository: GitRepositoryIdentity) -> GitRepositoryIdentity {
+        repositoriesByWorkingTreeRoot[repository.workingTreeRoot] = repository
+        return repository
+    }
+
+    public func remove(workingTreeRoot: String) {
+        repositoriesByWorkingTreeRoot.removeValue(forKey: workingTreeRoot)
+    }
+
+    public func repositories() -> [GitRepositoryIdentity] {
+        repositoriesByWorkingTreeRoot.values.sorted {
+            $0.workingTreeRoot.localizedStandardCompare($1.workingTreeRoot) == .orderedAscending
+        }
+    }
+
+    public func repositories(sharingCoordinationKey coordinationKey: String) -> [GitRepositoryIdentity] {
+        repositoriesByWorkingTreeRoot.values
+            .filter { $0.coordinationKey == coordinationKey }
+            .sorted {
+                $0.workingTreeRoot.localizedStandardCompare($1.workingTreeRoot) == .orderedAscending
+            }
+    }
+}
+
 public protocol GitService: Sendable {
     func repositoryRoot(for url: URL) async throws -> URL
     func repositoryIdentity(at repositoryURL: URL) async throws -> GitRepositoryIdentity
@@ -168,13 +198,16 @@ public protocol GitService: Sendable {
 public struct InProcessGitService: GitService, Sendable {
     private let engine: SystemGitEngine
     private let coordinator: GitOperationCoordinator
+    private let registry: GitRepositoryRegistry
 
     public init(
         engine: SystemGitEngine = SystemGitEngine(),
-        coordinator: GitOperationCoordinator = GitOperationCoordinator()
+        coordinator: GitOperationCoordinator = GitOperationCoordinator(),
+        registry: GitRepositoryRegistry = GitRepositoryRegistry()
     ) {
         self.engine = engine
         self.coordinator = coordinator
+        self.registry = registry
     }
 
     public func repositoryRoot(for url: URL) async throws -> URL {
@@ -184,9 +217,11 @@ public struct InProcessGitService: GitService, Sendable {
 
     public func repositoryIdentity(at repositoryURL: URL) async throws -> GitRepositoryIdentity {
         let engine = engine
-        return try await detached {
+        let identity = try await detached {
             try Self.resolveRepositoryIdentity(engine: engine, repositoryURL: repositoryURL)
         }
+        await registry.register(identity)
+        return identity
     }
 
     public func loadRepository(
@@ -194,15 +229,16 @@ public struct InProcessGitService: GitService, Sendable {
         includeMetadata: Bool,
         historyLimit: Int = 30
     ) async throws -> GitRepositoryLoad {
+        let identity = try await repositoryIdentity(at: repositoryURL)
         let engine = engine
         return try await detached {
-            let snapshot = try engine.status(at: repositoryURL)
+            let snapshot = try engine.status(at: identity.repositoryURL)
             return GitRepositoryLoad(
                 snapshot: snapshot,
-                branches: includeMetadata ? try engine.branches(at: repositoryURL) : nil,
-                history: includeMetadata ? try engine.history(at: repositoryURL, limit: historyLimit) : nil,
-                stashes: includeMetadata ? try engine.stashes(at: repositoryURL) : nil,
-                worktrees: includeMetadata ? try engine.worktrees(at: repositoryURL) : nil
+                branches: includeMetadata ? try engine.branches(at: identity.repositoryURL) : nil,
+                history: includeMetadata ? try engine.history(at: identity.repositoryURL, limit: historyLimit) : nil,
+                stashes: includeMetadata ? try engine.stashes(at: identity.repositoryURL) : nil,
+                worktrees: includeMetadata ? try engine.worktrees(at: identity.repositoryURL) : nil
             )
         }
     }
@@ -329,6 +365,10 @@ public struct InProcessGitService: GitService, Sendable {
         try await mutate(at: repositoryURL, label: "remove worktree") { engine, root in
             try engine.removeWorktree(at: root, path: path)
         }
+    }
+
+    public func registeredRepositories() async -> [GitRepositoryIdentity] {
+        await registry.repositories()
     }
 
     public func activeOperations() async -> [GitOperationRecord] {
