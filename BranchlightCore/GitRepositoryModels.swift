@@ -1,5 +1,57 @@
 import Foundation
 
+public struct GitRepositoryIdentity: Codable, Hashable, Sendable {
+    public let workingTreeRoot: String
+    public let gitDirectory: String
+    public let commonGitDirectory: String
+
+    public var coordinationKey: String { commonGitDirectory }
+
+    public var repositoryURL: URL {
+        URL(fileURLWithPath: workingTreeRoot, isDirectory: true)
+    }
+
+    public init(workingTreeRoot: String, gitDirectory: String, commonGitDirectory: String) {
+        self.workingTreeRoot = workingTreeRoot
+        self.gitDirectory = gitDirectory
+        self.commonGitDirectory = commonGitDirectory
+    }
+}
+
+public enum GitOperationState: String, Codable, Hashable, Sendable {
+    case running
+    case succeeded
+    case failed
+}
+
+public struct GitOperationRecord: Codable, Hashable, Identifiable, Sendable {
+    public let id: UUID
+    public let repository: GitRepositoryIdentity
+    public let label: String
+    public let state: GitOperationState
+    public let startedAt: Date
+    public let finishedAt: Date?
+    public let errorDescription: String?
+
+    public init(
+        id: UUID,
+        repository: GitRepositoryIdentity,
+        label: String,
+        state: GitOperationState,
+        startedAt: Date,
+        finishedAt: Date?,
+        errorDescription: String?
+    ) {
+        self.id = id
+        self.repository = repository
+        self.label = label
+        self.state = state
+        self.startedAt = startedAt
+        self.finishedAt = finishedAt
+        self.errorDescription = errorDescription
+    }
+}
+
 public struct GitBranch: Codable, Hashable, Identifiable, Sendable {
     public let name: String
     public let isCurrent: Bool
