@@ -372,3 +372,196 @@ final class GitRecoveryPlannerTests: XCTestCase {
         )
     }
 }
+
+final class GitRecoveryValidatorTests: XCTestCase {
+    func testMatchingCommitRecoveryProducesRevertAction() throws {
+        let record = makeRecord(
+            descriptor: GitOperationDescriptor(intent: .commit),
+            pre: checkpoint(head: "before", branch: "main", index: "tree-before"),
+            post: checkpoint(head: "created", branch: "main", index: "tree-after")
+        )
+        let plan = GitRecoveryPlanner.plan(for: record)
+        let status = cleanStatus(branch: "main")
+
+        let validation = GitRecoveryValidator.validate(
+            plan: plan,
+            sourceRecord: record,
+            currentCheckpoint: checkpoint(head: "created", branch: "main", index: "tree-after"),
+            currentStatus: status
+        )
+        XCTAssertTrue(validation.isValid)
+        XCTAssertEqual(
+            try GitRecoveryValidator.validatedAction(
+                plan: plan,
+                sourceRecord: record,
+                currentCheckpoint: checkpoint(head: "created", branch: "main", index: "tree-after"),
+                currentStatus: status
+            ),
+            .revertCommit("created")
+        )
+    }
+
+    func testChangedHeadAndBranchRejectRecovery() {
+        let record = makeRecord(
+            descriptor: GitOperationDescriptor(intent: .switchBranch, target: "feature"),
+            pre: checkpoint(head: "aaa", branch: "main", index: "tree"),
+            post: checkpoint(head: "bbb", branch: "feature", index: "tree")
+        )
+        let plan = GitRecoveryPlanner.plan(for: record)
+        let validation = GitRecoveryValidator.validate(
+            plan: plan,
+            sourceRecord: record,
+            currentCheckpoint: checkpoint(head: "ccc", branch: "other", index: "tree"),
+            currentStatus: cleanStatus(branch: "other")
+        )
+
+        XCTAssertFalse(validation.isValid)
+        XCTAssertTrue(validation.issues.contains(.headChanged))
+        XCTAssertTrue(validation.issues.contains(.branchChanged))
+    }
+
+    func testDirtyWorkingTreeRejectsBranchSwitchRecovery() {
+        let record = makeRecord(
+            descriptor: GitOperationDescriptor(intent: .switchBranch, target: "feature"),
+            pre: checkpoint(head: "aaa", branch: "main", index: "tree"),
+            post: checkpoint(head: "bbb", branch: "feature", index: "tree")
+        )
+        let plan = GitRecoveryPlanner.plan(for: record)
+        let dirty = GitStatusSnapshot(
+            repositoryRoot: "/tmp/repo",
+            branch: "feature",
+            isDetachedHead: false,
+            paths: [GitPathStatus(path: "A.swift", indexCode: " ", workTreeCode: "M", kind: .modified)]
+        )
+
+        let validation = GitRecoveryValidator.validate(
+            plan: plan,
+            sourceRecord: record,
+            currentCheckpoint: checkpoint(head: "bbb", branch: "feature", index: "tree"),
+            currentStatus: dirty
+        )
+        XCTAssertFalse(validation.isValid)
+        XCTAssertTrue(validation.issues.contains(.workingTreeNotClean))
+    }
+
+    func testOperationInProgressRejectsRecovery() {
+        let record = makeRecord(
+            descriptor: GitOperationDescriptor(intent: .commit),
+            pre: checkpoint(head: "before", branch: "main", index: "tree-before"),
+            post: checkpoint(head: "created", branch: "main", index: "tree-after")
+        )
+        let plan = GitRecoveryPlanner.plan(for: record)
+        let current = GitRepositoryCheckpoint(
+            headCommit: "created",
+            branch: "main",
+            isDetachedHead: false,
+            indexTree: "tree-after",
+            operationMode: .rebasing
+        )
+
+        let validation = GitRecoveryValidator.validate(
+            plan: plan,
+            sourceRecord: record,
+            currentCheckpoint: current,
+            currentStatus: cleanStatus(branch: "main")
+        )
+        XCTAssertFalse(validation.isValid)
+        XCTAssertTrue(validation.issues.contains(.operationInProgress))
+    }
+
+    func testStageRecoveryRemainsUnsupportedWithoutExactIndexCheckpoint() {
+        let record = makeRecord(
+            descriptor: GitOperationDescriptor(intent: .stage, affectedPaths: ["A.swift"]),
+            pre: checkpoint(head: "abc", branch: "main", index: "before"),
+            post: checkpoint(head: "abc", branch: "main", index: "after")
+        )
+        let plan = GitRecoveryPlanner.plan(for: record)
+        let validation = GitRecoveryValidator.validate(
+            plan: plan,
+            sourceRecord: record,
+            currentCheckpoint: checkpoint(head: "abc", branch: "main", index: "after"),
+            currentStatus: cleanStatus(branch: "main")
+        )
+
+        XCTAssertFalse(validation.isValid)
+        XCTAssertTrue(validation.issues.contains(.unsupportedExactIndexRestore))
+    }
+
+    func testMutationAdmissionSeparatesAllowedConfirmationAndBlocked() {
+        let safe = GitPreflightReport(
+            intent: .fetch,
+            risk: .safe,
+            signals: [],
+            blockingReasons: [],
+            warnings: []
+        )
+        XCTAssertEqual(GitMutationAdmission(report: safe).state, .allowed)
+
+        let caution = GitPreflightReport(
+            intent: .pull,
+            risk: .caution,
+            signals: [.dirtyWorkingTree],
+            blockingReasons: [],
+            warnings: ["dirty"]
+        )
+        XCTAssertEqual(GitMutationAdmission(report: caution).state, .confirmationRequired)
+        XCTAssertEqual(GitMutationAdmission(report: caution, confirmationProvided: true).state, .allowed)
+
+        let blocked = GitPreflightReport(
+            intent: .switchBranch,
+            risk: .caution,
+            signals: [.operationInProgress],
+            blockingReasons: ["operation in progress"],
+            warnings: []
+        )
+        XCTAssertEqual(GitMutationAdmission(report: blocked, confirmationProvided: true).state, .blocked)
+    }
+
+    private func makeRecord(
+        descriptor: GitOperationDescriptor,
+        pre: GitRepositoryCheckpoint,
+        post: GitRepositoryCheckpoint
+    ) -> GitOperationRecord {
+        GitOperationRecord(
+            id: UUID(),
+            repository: GitRepositoryIdentity(
+                workingTreeRoot: "/tmp/repo",
+                gitDirectory: "/tmp/repo/.git",
+                commonGitDirectory: "/tmp/repo/.git"
+            ),
+            label: "recovery-test",
+            descriptor: descriptor,
+            preCheckpoint: pre,
+            postCheckpoint: post,
+            state: .succeeded,
+            startedAt: Date(timeIntervalSince1970: 1),
+            finishedAt: Date(timeIntervalSince1970: 2),
+            errorDescription: nil
+        )
+    }
+
+    private func checkpoint(
+        head: String,
+        branch: String,
+        index: String
+    ) -> GitRepositoryCheckpoint {
+        GitRepositoryCheckpoint(
+            headCommit: head,
+            branch: branch,
+            isDetachedHead: false,
+            indexTree: index,
+            operationMode: .normal,
+            capturedAt: Date(timeIntervalSince1970: 1)
+        )
+    }
+
+    private func cleanStatus(branch: String) -> GitStatusSnapshot {
+        GitStatusSnapshot(
+            repositoryRoot: "/tmp/repo",
+            branch: branch,
+            isDetachedHead: false,
+            paths: [],
+            capturedAt: Date(timeIntervalSince1970: 1)
+        )
+    }
+}
