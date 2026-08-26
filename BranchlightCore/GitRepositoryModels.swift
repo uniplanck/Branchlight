@@ -299,6 +299,31 @@ public struct GitOperationDescriptor: Codable, Hashable, Sendable {
     }
 }
 
+public struct GitRepositoryCheckpoint: Codable, Hashable, Sendable {
+    public let headCommit: String?
+    public let branch: String?
+    public let isDetachedHead: Bool
+    public let indexTree: String?
+    public let operationMode: GitRepositoryOperationMode
+    public let capturedAt: Date
+
+    public init(
+        headCommit: String?,
+        branch: String?,
+        isDetachedHead: Bool,
+        indexTree: String?,
+        operationMode: GitRepositoryOperationMode,
+        capturedAt: Date = Date()
+    ) {
+        self.headCommit = headCommit
+        self.branch = branch
+        self.isDetachedHead = isDetachedHead
+        self.indexTree = indexTree
+        self.operationMode = operationMode
+        self.capturedAt = capturedAt
+    }
+}
+
 public enum GitOperationState: String, Codable, Hashable, Sendable {
     case running
     case succeeded
@@ -311,6 +336,8 @@ public struct GitOperationRecord: Codable, Hashable, Identifiable, Sendable {
     public let repository: GitRepositoryIdentity
     public let label: String
     public let descriptor: GitOperationDescriptor?
+    public let preCheckpoint: GitRepositoryCheckpoint?
+    public let postCheckpoint: GitRepositoryCheckpoint?
     public let state: GitOperationState
     public let startedAt: Date
     public let finishedAt: Date?
@@ -321,6 +348,8 @@ public struct GitOperationRecord: Codable, Hashable, Identifiable, Sendable {
         repository: GitRepositoryIdentity,
         label: String,
         descriptor: GitOperationDescriptor? = nil,
+        preCheckpoint: GitRepositoryCheckpoint? = nil,
+        postCheckpoint: GitRepositoryCheckpoint? = nil,
         state: GitOperationState,
         startedAt: Date,
         finishedAt: Date?,
@@ -330,6 +359,8 @@ public struct GitOperationRecord: Codable, Hashable, Identifiable, Sendable {
         self.repository = repository
         self.label = label
         self.descriptor = descriptor
+        self.preCheckpoint = preCheckpoint
+        self.postCheckpoint = postCheckpoint
         self.state = state
         self.startedAt = startedAt
         self.finishedAt = finishedAt
@@ -348,6 +379,8 @@ public struct GitRecoveryPlan: Codable, Hashable, Sendable {
     public let inverseIntent: GitMutationIntent?
     public let affectedPaths: [String]
     public let target: String?
+    public let expectedCurrentHead: String?
+    public let expectedCurrentIndexTree: String?
     public let reason: String
 
     public init(
@@ -356,6 +389,8 @@ public struct GitRecoveryPlan: Codable, Hashable, Sendable {
         inverseIntent: GitMutationIntent?,
         affectedPaths: [String] = [],
         target: String? = nil,
+        expectedCurrentHead: String? = nil,
+        expectedCurrentIndexTree: String? = nil,
         reason: String
     ) {
         self.sourceOperationID = sourceOperationID
@@ -363,6 +398,8 @@ public struct GitRecoveryPlan: Codable, Hashable, Sendable {
         self.inverseIntent = inverseIntent
         self.affectedPaths = affectedPaths
         self.target = target
+        self.expectedCurrentHead = expectedCurrentHead
+        self.expectedCurrentIndexTree = expectedCurrentIndexTree
         self.reason = reason
     }
 
@@ -381,25 +418,69 @@ public enum GitRecoveryPlanner {
         switch descriptor.intent {
         case .stage:
             guard descriptor.target != "patch", !descriptor.affectedPaths.isEmpty else {
-                return unavailable(record, "Patch-level staging requires an index checkpoint before it can be reversed safely.")
+                return unavailable(record, "Patch-level staging requires a captured patch or index checkpoint before reversal.")
+            }
+            guard let preIndex = record.preCheckpoint?.indexTree,
+                  let postIndex = record.postCheckpoint?.indexTree,
+                  preIndex != postIndex else {
+                return unavailable(record, "A distinct pre/post index checkpoint is required before unstaging can be proposed.")
             }
             return GitRecoveryPlan(
                 sourceOperationID: record.id,
                 availability: .validationRequired,
                 inverseIntent: .unstage,
                 affectedPaths: descriptor.affectedPaths,
-                reason: "Validate the current index against a checkpoint before unstaging the recorded paths."
+                expectedCurrentHead: record.postCheckpoint?.headCommit,
+                expectedCurrentIndexTree: postIndex,
+                reason: "Validate HEAD and the current index tree against the post-operation checkpoint before restoring staged paths."
             )
         case .unstage:
             guard descriptor.target != "patch", !descriptor.affectedPaths.isEmpty else {
                 return unavailable(record, "Patch-level unstaging requires the previous index contents to be checkpointed.")
+            }
+            guard let preIndex = record.preCheckpoint?.indexTree,
+                  let postIndex = record.postCheckpoint?.indexTree,
+                  preIndex != postIndex else {
+                return unavailable(record, "A distinct pre/post index checkpoint is required before restaging can be proposed.")
             }
             return GitRecoveryPlan(
                 sourceOperationID: record.id,
                 availability: .validationRequired,
                 inverseIntent: .stage,
                 affectedPaths: descriptor.affectedPaths,
-                reason: "Restaging whole paths may not recreate a previous partial index; checkpoint validation is required."
+                expectedCurrentHead: record.postCheckpoint?.headCommit,
+                expectedCurrentIndexTree: postIndex,
+                reason: "Restaging whole paths can differ from a prior partial index, so checkpoint validation remains mandatory."
+            )
+        case .switchBranch:
+            guard let previousBranch = record.preCheckpoint?.branch,
+                  record.preCheckpoint?.isDetachedHead == false,
+                  !previousBranch.isEmpty else {
+                return unavailable(record, "The previous attached branch is not available in the pre-operation checkpoint.")
+            }
+            return GitRecoveryPlan(
+                sourceOperationID: record.id,
+                availability: .validationRequired,
+                inverseIntent: .switchBranch,
+                target: previousBranch,
+                expectedCurrentHead: record.postCheckpoint?.headCommit,
+                expectedCurrentIndexTree: record.postCheckpoint?.indexTree,
+                reason: "Return to the previous branch only if HEAD and index still match the post-switch checkpoint."
+            )
+        case .commit:
+            guard let createdCommit = record.postCheckpoint?.headCommit,
+                  let previousHead = record.preCheckpoint?.headCommit,
+                  createdCommit != previousHead else {
+                return unavailable(record, "The created commit cannot be distinguished from the pre-operation HEAD.")
+            }
+            return GitRecoveryPlan(
+                sourceOperationID: record.id,
+                availability: .validationRequired,
+                inverseIntent: .revert,
+                target: createdCommit,
+                expectedCurrentHead: createdCommit,
+                expectedCurrentIndexTree: record.postCheckpoint?.indexTree,
+                reason: "Prefer a new revert commit over rewriting history, and only after validating the post-commit checkpoint."
             )
         case .worktreeAdd:
             guard let target = descriptor.target, !target.isEmpty else {
@@ -410,20 +491,17 @@ public enum GitRecoveryPlanner {
                 availability: .validationRequired,
                 inverseIntent: .worktreeRemove,
                 target: target,
+                expectedCurrentHead: record.postCheckpoint?.headCommit,
                 reason: "Verify the worktree is still registered, clean, unlocked, and unchanged before removal."
             )
-        case .switchBranch:
-            return unavailable(record, "The previous branch and HEAD checkpoint are not recorded yet.")
-        case .commit:
-            return unavailable(record, "The resulting commit hash is not recorded yet; automatic revert would be unsafe.")
         case .pull:
-            return unavailable(record, "Pre-pull HEAD and index checkpoints are required before rollback can be planned.")
+            return unavailable(record, "A pull can change both HEAD and the working tree; rollback remains disabled until a full restore executor exists.")
         case .push:
             return unavailable(record, "Remote history must never be rewritten automatically as an undo operation.")
         case .stashCreate:
             return unavailable(record, "The created stash reference must be captured before a drop recovery can be proposed.")
         case .stashApply:
-            return unavailable(record, "Applying or popping a stash mutates the working tree and requires a pre-apply checkpoint.")
+            return unavailable(record, "Applying or popping a stash mutates the working tree and requires a durable working-tree checkpoint.")
         case .stashDrop:
             return unavailable(record, "Dropping a stash is destructive and has no guaranteed local inverse.")
         case .worktreeRemove:
@@ -431,7 +509,7 @@ public enum GitRecoveryPlanner {
         case .fetch:
             return unavailable(record, "Fetch updates remote-tracking metadata and normally does not require an undo action.")
         case .merge, .rebase, .cherryPick, .revert, .resetHard:
-            return unavailable(record, "This operation requires durable pre/post checkpoints before recovery can be offered.")
+            return unavailable(record, "This operation requires a dedicated recovery executor and stronger working-tree checkpoints.")
         }
     }
 
