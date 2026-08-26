@@ -37,10 +37,29 @@ final class AppModel: ObservableObject {
     private let cache = HostStatusCache()
     private let finderRequestCache = HostFinderRequestCache()
     private let gitService: any GitService
+    private let historyMutationService: any GitHistoryMutationService
     private var repositoryWatcher: RepositoryWatcher?
 
-    init(gitService: any GitService = InProcessGitService()) {
+    init() {
+        let engine = SystemGitEngine()
+        let coordinator = GitOperationCoordinator()
+        let registry = GitRepositoryRegistry()
+        let base = InProcessGitService(engine: engine, coordinator: coordinator, registry: registry)
+        self.gitService = base
+        self.historyMutationService = CoordinatedGitHistoryMutationService(
+            engine: engine,
+            coordinator: coordinator,
+            base: base
+        )
+        Task { await restoreCachedState() }
+    }
+
+    init(
+        gitService: any GitService,
+        historyMutationService: any GitHistoryMutationService
+    ) {
         self.gitService = gitService
+        self.historyMutationService = historyMutationService
         Task { await restoreCachedState() }
     }
 
@@ -389,6 +408,56 @@ final class AppModel: ObservableObject {
     func skipRebaseCommit() {
         runMutation(label: "Rebase commit skipped") { service, repositoryURL in
             _ = try await service.skipRebase(at: repositoryURL)
+        }
+    }
+
+    func cherryPick(_ commit: GitCommit) {
+        let historyService = historyMutationService
+        runMutation(label: "Cherry-picked \(commit.shortHash)") { _, repositoryURL in
+            _ = try await historyService.cherryPick(
+                at: repositoryURL,
+                commitHash: commit.hash,
+                confirmationProvided: true
+            )
+        }
+    }
+
+    func continueCherryPick() {
+        let historyService = historyMutationService
+        runMutation(label: "Cherry-pick continued") { _, repositoryURL in
+            _ = try await historyService.continueCherryPick(at: repositoryURL)
+        }
+    }
+
+    func abortCherryPick() {
+        let historyService = historyMutationService
+        runMutation(label: "Cherry-pick aborted") { _, repositoryURL in
+            _ = try await historyService.abortCherryPick(at: repositoryURL)
+        }
+    }
+
+    func revert(_ commit: GitCommit) {
+        let historyService = historyMutationService
+        runMutation(label: "Reverted \(commit.shortHash)") { _, repositoryURL in
+            _ = try await historyService.revert(
+                at: repositoryURL,
+                commitHash: commit.hash,
+                confirmationProvided: true
+            )
+        }
+    }
+
+    func continueRevert() {
+        let historyService = historyMutationService
+        runMutation(label: "Revert continued") { _, repositoryURL in
+            _ = try await historyService.continueRevert(at: repositoryURL)
+        }
+    }
+
+    func abortRevert() {
+        let historyService = historyMutationService
+        runMutation(label: "Revert aborted") { _, repositoryURL in
+            _ = try await historyService.abortRevert(at: repositoryURL)
         }
     }
 
