@@ -264,3 +264,50 @@ public struct GitMutationAdmission: Codable, Hashable, Sendable {
 
     public var mayExecute: Bool { state == .allowed }
 }
+
+public enum GitMutationAdmissionError: LocalizedError, Sendable {
+    case blocked(GitPreflightReport)
+    case confirmationRequired(GitPreflightReport)
+
+    public var errorDescription: String? {
+        switch self {
+        case .blocked(let report):
+            return report.blockingReasons.first ?? "The Git operation is blocked by the current repository state."
+        case .confirmationRequired(let report):
+            return report.warnings.first ?? "This Git operation requires explicit confirmation."
+        }
+    }
+}
+
+public extension GitService {
+    func mutationAdmission(
+        at repositoryURL: URL,
+        intent: GitMutationIntent,
+        confirmationProvided: Bool = false
+    ) async throws -> GitMutationAdmission {
+        let intelligence = try await repositoryIntelligence(at: repositoryURL)
+        let report = GitSafetyPreflight.evaluate(intent: intent, intelligence: intelligence)
+        return GitMutationAdmission(report: report, confirmationProvided: confirmationProvided)
+    }
+
+    @discardableResult
+    func requireMutationAdmission(
+        at repositoryURL: URL,
+        intent: GitMutationIntent,
+        confirmationProvided: Bool = false
+    ) async throws -> GitPreflightReport {
+        let admission = try await mutationAdmission(
+            at: repositoryURL,
+            intent: intent,
+            confirmationProvided: confirmationProvided
+        )
+        switch admission.state {
+        case .allowed:
+            return admission.report
+        case .confirmationRequired:
+            throw GitMutationAdmissionError.confirmationRequired(admission.report)
+        case .blocked:
+            throw GitMutationAdmissionError.blocked(admission.report)
+        }
+    }
+}
