@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 
 final class XPCServiceIntegrationTests: XCTestCase {
-    func testBundledServiceLaunchesAndServesRepositoryReads() async throws {
+    func testBundledServiceLaunchesAndServesRepositoryReadsAndMutations() async throws {
         let fixture = FileManager.default.temporaryDirectory
             .appendingPathComponent("Branchlight-XPC-Integration-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
@@ -47,26 +47,43 @@ final class XPCServiceIntegrationTests: XCTestCase {
             identityResponse.identity.gitDirectory
         )
 
-        let intelligenceRequest = GitXPCRepositoryIntelligenceRequest(
-            repositoryPath: nested.standardizedFileURL.path
-        )
-        let intelligenceResponse = try await repositoryIntelligence(
-            proxy,
-            request: intelligenceRequest
-        )
-        let intelligence = intelligenceResponse.intelligence
+        let initial = try await intelligence(proxy, repositoryPath: nested.path)
+        XCTAssertEqual(initial.identity, identityResponse.identity)
+        XCTAssertEqual(initial.branch, "main")
+        XCTAssertFalse(initial.isDetachedHead)
+        XCTAssertEqual(initial.operationMode, .normal)
+        XCTAssertEqual(initial.changedCount, 1)
+        XCTAssertEqual(initial.untrackedCount, 1)
+        XCTAssertEqual(initial.stagedCount, 0)
+        XCTAssertEqual(initial.conflictCount, 0)
+        XCTAssertNil(initial.upstream)
 
-        XCTAssertEqual(intelligenceResponse.protocolVersion, BranchlightGitXPCContract.protocolVersion)
-        XCTAssertEqual(intelligenceResponse.requestID, intelligenceRequest.requestID)
-        XCTAssertEqual(intelligence.identity, identityResponse.identity)
-        XCTAssertEqual(intelligence.branch, "main")
-        XCTAssertFalse(intelligence.isDetachedHead)
-        XCTAssertEqual(intelligence.operationMode, .normal)
-        XCTAssertEqual(intelligence.changedCount, 1)
-        XCTAssertEqual(intelligence.untrackedCount, 1)
-        XCTAssertEqual(intelligence.stagedCount, 0)
-        XCTAssertEqual(intelligence.conflictCount, 0)
-        XCTAssertNil(intelligence.upstream)
+        // Mutate only the isolated temporary repository. This proves the XPC process owns
+        // a working mutation coordinator without switching the production Host yet.
+        let relativePath = "Sources/Feature/change.txt"
+        let stageResponse = try await performMutation(
+            proxy,
+            repositoryPath: nested.path,
+            mutation: .stage(paths: [relativePath])
+        )
+        XCTAssertNil(stageResponse.output)
+
+        let staged = try await intelligence(proxy, repositoryPath: nested.path)
+        XCTAssertEqual(staged.changedCount, 1)
+        XCTAssertEqual(staged.stagedCount, 1)
+        XCTAssertEqual(staged.untrackedCount, 0)
+
+        let unstageResponse = try await performMutation(
+            proxy,
+            repositoryPath: nested.path,
+            mutation: .unstage(paths: [relativePath])
+        )
+        XCTAssertNil(unstageResponse.output)
+
+        let unstaged = try await intelligence(proxy, repositoryPath: nested.path)
+        XCTAssertEqual(unstaged.changedCount, 1)
+        XCTAssertEqual(unstaged.stagedCount, 0)
+        XCTAssertEqual(unstaged.untrackedCount, 1)
     }
 
     private func makeProxy(connection: NSXPCConnection) throws -> BranchlightGitXPCProtocol {
@@ -113,13 +130,14 @@ final class XPCServiceIntegrationTests: XCTestCase {
         }
     }
 
-    private func repositoryIntelligence(
+    private func intelligence(
         _ proxy: BranchlightGitXPCProtocol,
-        request: GitXPCRepositoryIntelligenceRequest
-    ) async throws -> GitXPCRepositoryIntelligenceResponse {
+        repositoryPath: String
+    ) async throws -> GitRepositoryIntelligence {
+        let request = GitXPCRepositoryIntelligenceRequest(repositoryPath: repositoryPath)
         let requestData = try GitXPCCodec.encode(request)
         return try await withCheckedThrowingContinuation { continuation in
-            let gate = XPCContinuationGate<GitXPCRepositoryIntelligenceResponse>(continuation)
+            let gate = XPCContinuationGate<GitRepositoryIntelligence>(continuation)
             scheduleTimeout(gate, operation: "repositoryIntelligence")
             proxy.repositoryIntelligence(requestData) { data, error in
                 do {
@@ -129,6 +147,36 @@ final class XPCServiceIntegrationTests: XCTestCase {
                         GitXPCRepositoryIntelligenceResponse.self,
                         from: data
                     )
+                    try GitXPCCodec.validateProtocolVersion(response.protocolVersion)
+                    guard response.requestID == request.requestID else {
+                        throw GitXPCContractError.requestIDMismatch
+                    }
+                    gate.succeed(response.intelligence)
+                } catch {
+                    gate.fail(error)
+                }
+            }
+        }
+    }
+
+    private func performMutation(
+        _ proxy: BranchlightGitXPCProtocol,
+        repositoryPath: String,
+        mutation: GitXPCMutation
+    ) async throws -> GitXPCMutationResponse {
+        let request = GitXPCMutationRequest(
+            repositoryPath: repositoryPath,
+            mutation: mutation
+        )
+        let requestData = try GitXPCCodec.encode(request)
+        return try await withCheckedThrowingContinuation { continuation in
+            let gate = XPCContinuationGate<GitXPCMutationResponse>(continuation)
+            scheduleTimeout(gate, operation: "performMutation")
+            proxy.performMutation(requestData) { data, error in
+                do {
+                    if let error { throw error }
+                    guard let data else { throw GitXPCContractError.missingReplyPayload }
+                    let response = try GitXPCCodec.decode(GitXPCMutationResponse.self, from: data)
                     try GitXPCCodec.validateProtocolVersion(response.protocolVersion)
                     guard response.requestID == request.requestID else {
                         throw GitXPCContractError.requestIDMismatch
