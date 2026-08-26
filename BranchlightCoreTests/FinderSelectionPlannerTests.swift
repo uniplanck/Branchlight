@@ -139,7 +139,8 @@ final class GitRuntimeFoundationTests: XCTestCase {
             // Expected.
         }
 
-        XCTAssertFalse(await cancelledBodyEntered.isSignaled)
+        let bodyEntered = await cancelledBodyEntered.isSignaled
+        XCTAssertFalse(bodyEntered)
         let records = await coordinator.recentOperations(limit: 2)
         XCTAssertEqual(records.first(where: { $0.label == "cancelled" })?.state, .cancelled)
     }
