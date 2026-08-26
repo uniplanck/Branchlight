@@ -17,6 +17,9 @@ struct ContentView: View {
     @State private var historyMode: HistoryMode = .repository
     @State private var stashToDrop: GitStashEntry?
     @State private var worktreeToRemove: GitWorktree?
+    @State private var commitToCherryPick: GitCommit?
+    @State private var commitToRevert: GitCommit?
+    @State private var inspectedCommit: GitCommit?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -95,6 +98,34 @@ struct ContentView: View {
             Button("Pull") { model.pull() }
         } message: {
             Text("Branchlight uses git pull --ff-only. It will not create an automatic merge commit.")
+        }
+        .alert("Cherry-pick commit?", isPresented: Binding(
+            get: { commitToCherryPick != nil },
+            set: { if !$0 { commitToCherryPick = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { commitToCherryPick = nil }
+            Button("Cherry-pick") {
+                if let commit = commitToCherryPick { model.cherryPick(commit) }
+                commitToCherryPick = nil
+            }
+        } message: {
+            if let commit = commitToCherryPick {
+                Text("Apply \(commit.shortHash) “\(commit.subject)” onto the current branch? Conflicts will remain in progress for resolution in Branchlight.")
+            }
+        }
+        .alert("Revert commit?", isPresented: Binding(
+            get: { commitToRevert != nil },
+            set: { if !$0 { commitToRevert = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { commitToRevert = nil }
+            Button("Revert") {
+                if let commit = commitToRevert { model.revert(commit) }
+                commitToRevert = nil
+            }
+        } message: {
+            if let commit = commitToRevert {
+                Text("Create a new commit that reverses \(commit.shortHash) “\(commit.subject)”? Existing history will not be rewritten.")
+            }
         }
         .alert("Drop stash?", isPresented: Binding(
             get: { stashToDrop != nil },
@@ -253,6 +284,15 @@ struct ContentView: View {
 
     private var hasGitOperationInProgress: Bool {
         currentRepositoryIntelligence?.operationMode != .normal
+    }
+
+    private func isControllableOperation(_ mode: GitRepositoryOperationMode) -> Bool {
+        switch mode {
+        case .merging, .rebasing, .cherryPicking, .reverting:
+            return true
+        case .normal, .bisecting:
+            return false
+        }
     }
 
     private func changesView(_ snapshot: GitStatusSnapshot) -> some View {
@@ -540,12 +580,20 @@ struct ContentView: View {
                 }
             }
 
+            if let intelligence = currentRepositoryIntelligence, isControllableOperation(intelligence.operationMode) {
+                advancedOperationCard(intelligence)
+            }
+
+            if let inspectedCommit {
+                commitDetailCard(inspectedCommit)
+            }
+
             switch historyMode {
             case .repository:
-                commitList(model.history)
+                commitList(model.history, showMutationActions: true)
             case .file:
                 if model.canInspectSelectedFile {
-                    commitList(model.fileHistory)
+                    commitList(model.fileHistory, showMutationActions: false)
                 } else {
                     historySelectionHint("Select one changed file in Changes, then return here for its history.")
                 }
@@ -558,10 +606,13 @@ struct ContentView: View {
             }
         }
         .padding(.top, 8)
-        .onChange(of: historyMode) { _ in loadHistoryMode() }
+        .onChange(of: historyMode) { _ in
+            inspectedCommit = nil
+            loadHistoryMode()
+        }
     }
 
-    private func commitList(_ commits: [GitCommit]) -> some View {
+    private func commitList(_ commits: [GitCommit], showMutationActions: Bool) -> some View {
         List(commits) { commit in
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(commit.shortHash)
@@ -582,8 +633,41 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button("Details") { inspectedCommit = commit }
+                if showMutationActions {
+                    Button("Cherry-pick…") { commitToCherryPick = commit }
+                        .disabled(model.isRefreshing || hasGitOperationInProgress)
+                    Button("Revert…") { commitToRevert = commit }
+                        .disabled(model.isRefreshing || hasGitOperationInProgress)
+                }
             }
             .padding(.vertical, 2)
+        }
+    }
+
+    private func commitDetailCard(_ commit: GitCommit) -> some View {
+        GroupBox("Commit Detail") {
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(commit.subject)
+                        .font(.headline)
+                    HStack(spacing: 6) {
+                        Text(commit.author)
+                        if let date = commit.authoredAt {
+                            Text("·")
+                            Text(date.formatted(date: .abbreviated, time: .standard))
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    Text(commit.hash)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                Button("Close") { inspectedCommit = nil }
+            }
         }
     }
 
@@ -635,8 +719,7 @@ struct ContentView: View {
 
     private var branchesView: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if let intelligence = currentRepositoryIntelligence,
-               intelligence.operationMode == .merging || intelligence.operationMode == .rebasing {
+            if let intelligence = currentRepositoryIntelligence, isControllableOperation(intelligence.operationMode) {
                 advancedOperationCard(intelligence)
             }
 
@@ -731,7 +814,7 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Label(
-                        intelligence.operationMode == .merging ? "Merge in progress" : "Rebase in progress",
+                        operationTitle(intelligence.operationMode),
                         systemImage: intelligence.conflictCount > 0 ? "exclamationmark.triangle.fill" : "arrow.triangle.2.circlepath"
                     )
                     .font(.headline)
@@ -749,20 +832,44 @@ struct ContentView: View {
 
                 Spacer()
 
-                if intelligence.operationMode == .merging {
+                switch intelligence.operationMode {
+                case .merging:
                     Button("Continue") { model.continueMerge() }
                         .disabled(model.isRefreshing || intelligence.conflictCount > 0)
                     Button("Abort", role: .destructive) { model.abortMerge() }
                         .disabled(model.isRefreshing)
-                } else {
+                case .rebasing:
                     Button("Continue") { model.continueRebase() }
                         .disabled(model.isRefreshing || intelligence.conflictCount > 0)
                     Button("Skip Commit") { model.skipRebaseCommit() }
                         .disabled(model.isRefreshing)
                     Button("Abort", role: .destructive) { model.abortRebase() }
                         .disabled(model.isRefreshing)
+                case .cherryPicking:
+                    Button("Continue") { model.continueCherryPick() }
+                        .disabled(model.isRefreshing || intelligence.conflictCount > 0)
+                    Button("Abort", role: .destructive) { model.abortCherryPick() }
+                        .disabled(model.isRefreshing)
+                case .reverting:
+                    Button("Continue") { model.continueRevert() }
+                        .disabled(model.isRefreshing || intelligence.conflictCount > 0)
+                    Button("Abort", role: .destructive) { model.abortRevert() }
+                        .disabled(model.isRefreshing)
+                case .normal, .bisecting:
+                    EmptyView()
                 }
             }
+        }
+    }
+
+    private func operationTitle(_ mode: GitRepositoryOperationMode) -> String {
+        switch mode {
+        case .merging: return "Merge in progress"
+        case .rebasing: return "Rebase in progress"
+        case .cherryPicking: return "Cherry-pick in progress"
+        case .reverting: return "Revert in progress"
+        case .bisecting: return "Bisect in progress"
+        case .normal: return "No Git operation in progress"
         }
     }
 
@@ -792,7 +899,7 @@ struct ContentView: View {
                     Text("No unresolved conflicts")
                         .font(.headline)
                     if let intelligence = currentRepositoryIntelligence,
-                       intelligence.operationMode == .merging || intelligence.operationMode == .rebasing {
+                       isControllableOperation(intelligence.operationMode) {
                         Text("The repository operation is still in progress. Continue or abort it below.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
