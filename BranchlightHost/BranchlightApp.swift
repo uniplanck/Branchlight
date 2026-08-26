@@ -19,6 +19,7 @@ struct BranchlightApp: App {
     @NSApplicationDelegateAdaptor(BranchlightAppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
     @StateObject private var githubModel = GitHubPanelModel()
+    @StateObject private var aiModel = GitAIWorkbenchModel()
 
     var body: some Scene {
         WindowGroup {
@@ -45,6 +46,14 @@ struct BranchlightApp: App {
                 .frame(minWidth: 760, minHeight: 560)
         }
         .defaultSize(width: 900, height: 680)
+
+        Window("AI Workbench", id: "ai-workbench") {
+            GitAIWorkbenchView()
+                .environmentObject(model)
+                .environmentObject(aiModel)
+                .frame(minWidth: 760, minHeight: 580)
+        }
+        .defaultSize(width: 920, height: 720)
     }
 }
 
@@ -58,6 +67,12 @@ struct BranchlightCommands: Commands {
                 openWindow(id: "github-live")
             }
             .keyboardShortcut("g", modifiers: [.command, .shift])
+
+            Button("AI Workbench") {
+                openWindow(id: "ai-workbench")
+            }
+            .keyboardShortcut("a", modifiers: [.command, .shift])
+            .disabled(model.repositoryURL == nil)
 
             Divider()
 
@@ -248,6 +263,65 @@ final class GitHubPanelModel: ObservableObject {
         checkRuns = []
         reviews = []
         reviewedPullRequestNumber = nil
+    }
+}
+
+@MainActor
+final class GitAIWorkbenchModel: ObservableObject {
+    @Published var intent: GitAIIntent = .explainDiff
+    @Published var instruction = ""
+    @Published private(set) var context: GitAIContext?
+    @Published private(set) var prompt = ""
+    @Published private(set) var isLoading = false
+    @Published private(set) var errorMessage: String?
+
+    private let service: InProcessGitService
+
+    init(service: InProcessGitService = InProcessGitService()) {
+        self.service = service
+    }
+
+    func refresh(repositoryURL: URL?) async {
+        guard let repositoryURL else {
+            context = nil
+            prompt = ""
+            errorMessage = nil
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+        do {
+            let context = try await service.intelligentContext(at: repositoryURL)
+            self.context = context
+            rebuildPrompt()
+            isLoading = false
+        } catch {
+            errorMessage = error.localizedDescription
+            isLoading = false
+        }
+    }
+
+    func rebuildPrompt() {
+        guard let context else {
+            prompt = ""
+            return
+        }
+        let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        prompt = GitAIPromptBuilder.prompt(
+            for: GitAIRequest(
+                intent: intent,
+                context: context,
+                instruction: trimmed.isEmpty ? nil : trimmed
+            )
+        )
+    }
+
+    func copyPrompt() {
+        guard !prompt.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(prompt, forType: .string)
     }
 }
 
@@ -485,6 +559,105 @@ struct GitHubLiveView: View {
         case "failure", "cancelled", "timed_out": return "xmark.circle.fill"
         case nil: return "clock"
         default: return "circle"
+        }
+    }
+}
+
+struct GitAIWorkbenchView: View {
+    @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var ai: GitAIWorkbenchModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("AI Workbench")
+                        .font(.title2.weight(.semibold))
+                    Text("Preview the exact sanitized context before it leaves Branchlight.")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Refresh Context") {
+                    Task { await ai.refresh(repositoryURL: model.repositoryURL) }
+                }
+                .disabled(model.repositoryURL == nil || ai.isLoading)
+                Button("Copy Prompt") { ai.copyPrompt() }
+                    .disabled(ai.prompt.isEmpty)
+            }
+
+            HStack(spacing: 12) {
+                Picker("Task", selection: $ai.intent) {
+                    ForEach(GitAIIntent.allCases, id: \.self) { intent in
+                        Text(intentTitle(intent)).tag(intent)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: ai.intent) { _ in ai.rebuildPrompt() }
+
+                TextField("Optional instruction", text: $ai.instruction)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { ai.rebuildPrompt() }
+                    .onChange(of: ai.instruction) { _ in ai.rebuildPrompt() }
+            }
+
+            if let context = ai.context {
+                HStack(spacing: 14) {
+                    Label(context.branch, systemImage: "point.3.connected.trianglepath.dotted")
+                    if let tracking = context.tracking {
+                        Text(tracking.summary)
+                    }
+                    Text("\(context.paths.count) visible paths")
+                    if !context.redactedPaths.isEmpty {
+                        Label("\(context.redactedPaths.count) redacted", systemImage: "eye.slash")
+                    }
+                    if context.wasTruncated {
+                        Label("truncated", systemImage: "scissors")
+                    }
+                    Spacer()
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            if let error = ai.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+            }
+
+            GroupBox("Generated prompt") {
+                if ai.isLoading {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if ai.prompt.isEmpty {
+                    Text("Choose a repository and refresh its context.")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView([.vertical, .horizontal]) {
+                        Text(ai.prompt)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                            .padding(8)
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .task {
+            await ai.refresh(repositoryURL: model.repositoryURL)
+        }
+        .onChange(of: model.repositoryURL) { _ in
+            Task { await ai.refresh(repositoryURL: model.repositoryURL) }
+        }
+    }
+
+    private func intentTitle(_ intent: GitAIIntent) -> String {
+        switch intent {
+        case .explainDiff: return "Explain"
+        case .reviewChanges: return "Review"
+        case .composeCommitMessage: return "Commit"
+        case .assistConflict: return "Conflict"
         }
     }
 }
