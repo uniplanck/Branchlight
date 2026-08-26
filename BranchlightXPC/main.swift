@@ -46,16 +46,8 @@ private final class BranchlightGitXPCService: NSObject, BranchlightGitXPCProtoco
                     from: requestData
                 )
                 try GitXPCCodec.validateProtocolVersion(request.protocolVersion)
-                guard request.repositoryPath.hasPrefix("/"),
-                      !request.repositoryPath.contains("\0") else {
-                    throw GitEngineError.invalidInput(
-                        "XPC repository requests require an absolute local path."
-                    )
-                }
-
-                let identity = try await gitService.repositoryIdentity(
-                    at: URL(fileURLWithPath: request.repositoryPath, isDirectory: true)
-                )
+                let repositoryURL = try Self.validatedRepositoryURL(request.repositoryPath)
+                let identity = try await gitService.repositoryIdentity(at: repositoryURL)
                 let response = GitXPCRepositoryIdentityResponse(
                     requestID: request.requestID,
                     identity: identity
@@ -65,6 +57,42 @@ private final class BranchlightGitXPCService: NSObject, BranchlightGitXPCProtoco
                 replyBox.send(nil, error: error as NSError)
             }
         }
+    }
+
+    func repositoryIntelligence(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?, NSError?) -> Void
+    ) {
+        let replyBox = XPCReplyBox(reply)
+        let gitService = gitService
+
+        Task {
+            do {
+                let request = try GitXPCCodec.decode(
+                    GitXPCRepositoryIntelligenceRequest.self,
+                    from: requestData
+                )
+                try GitXPCCodec.validateProtocolVersion(request.protocolVersion)
+                let repositoryURL = try Self.validatedRepositoryURL(request.repositoryPath)
+                let intelligence = try await gitService.repositoryIntelligence(at: repositoryURL)
+                let response = GitXPCRepositoryIntelligenceResponse(
+                    requestID: request.requestID,
+                    intelligence: intelligence
+                )
+                replyBox.send(try GitXPCCodec.encode(response), error: nil)
+            } catch {
+                replyBox.send(nil, error: error as NSError)
+            }
+        }
+    }
+
+    private static func validatedRepositoryURL(_ path: String) throws -> URL {
+        guard path.hasPrefix("/"), !path.contains("\0") else {
+            throw GitEngineError.invalidInput(
+                "XPC repository requests require an absolute local path."
+            )
+        }
+        return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
     }
 }
 
