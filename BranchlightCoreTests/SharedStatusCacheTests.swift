@@ -168,3 +168,105 @@ final class SharedStatusCacheTests: XCTestCase {
         return (cacheDirectory, preferencesURL)
     }
 }
+
+final class GitSafetyPreflightTests: XCTestCase {
+    func testCleanFetchIsSafeAndProceedable() {
+        let report = GitSafetyPreflight.evaluate(
+            intent: .fetch,
+            intelligence: makeIntelligence()
+        )
+
+        XCTAssertEqual(report.risk, .safe)
+        XCTAssertTrue(report.canProceed)
+        XCTAssertFalse(report.requiresConfirmation)
+        XCTAssertTrue(report.signals.isEmpty)
+    }
+
+    func testDivergedDirtyPullRequiresConfirmation() {
+        let report = GitSafetyPreflight.evaluate(
+            intent: .pull,
+            intelligence: makeIntelligence(
+                upstream: "origin/main",
+                tracking: GitAheadBehind(ahead: 2, behind: 3),
+                changedCount: 2,
+                untrackedCount: 1
+            )
+        )
+
+        XCTAssertEqual(report.risk, .caution)
+        XCTAssertTrue(report.canProceed)
+        XCTAssertTrue(report.requiresConfirmation)
+        XCTAssertTrue(report.signals.contains(.dirtyWorkingTree))
+        XCTAssertTrue(report.signals.contains(.untrackedFiles))
+        XCTAssertTrue(report.signals.contains(.upstreamDiverged))
+        XCTAssertEqual(report.warnings.count, 3)
+    }
+
+    func testBranchSwitchIsBlockedDuringConflictedMerge() {
+        let report = GitSafetyPreflight.evaluate(
+            intent: .switchBranch,
+            intelligence: makeIntelligence(
+                operationMode: .merging,
+                changedCount: 1,
+                conflictCount: 1
+            )
+        )
+
+        XCTAssertFalse(report.canProceed)
+        XCTAssertEqual(report.risk, .caution)
+        XCTAssertTrue(report.signals.contains(.operationInProgress))
+        XCTAssertTrue(report.signals.contains(.conflicts))
+        XCTAssertEqual(report.blockingReasons.count, 2)
+    }
+
+    func testIrreversibleRemovalIsAlwaysDestructive() {
+        let stashDrop = GitSafetyPreflight.evaluate(
+            intent: .stashDrop,
+            intelligence: makeIntelligence()
+        )
+        let worktreeRemove = GitSafetyPreflight.evaluate(
+            intent: .worktreeRemove,
+            intelligence: makeIntelligence()
+        )
+        let resetHard = GitSafetyPreflight.evaluate(
+            intent: .resetHard,
+            intelligence: makeIntelligence()
+        )
+
+        XCTAssertEqual(stashDrop.risk, .destructive)
+        XCTAssertEqual(worktreeRemove.risk, .destructive)
+        XCTAssertEqual(resetHard.risk, .destructive)
+        XCTAssertTrue(stashDrop.requiresConfirmation)
+        XCTAssertTrue(worktreeRemove.requiresConfirmation)
+        XCTAssertTrue(resetHard.requiresConfirmation)
+    }
+
+    private func makeIntelligence(
+        upstream: String? = "origin/main",
+        tracking: GitAheadBehind? = GitAheadBehind(ahead: 0, behind: 0),
+        isDetachedHead: Bool = false,
+        operationMode: GitRepositoryOperationMode = .normal,
+        changedCount: Int = 0,
+        stagedCount: Int = 0,
+        untrackedCount: Int = 0,
+        conflictCount: Int = 0
+    ) -> GitRepositoryIntelligence {
+        GitRepositoryIntelligence(
+            identity: GitRepositoryIdentity(
+                workingTreeRoot: "/tmp/repo",
+                gitDirectory: "/tmp/repo/.git",
+                commonGitDirectory: "/tmp/repo/.git"
+            ),
+            branch: "main",
+            upstream: upstream,
+            tracking: tracking,
+            isDetachedHead: isDetachedHead,
+            operationMode: operationMode,
+            changedCount: changedCount,
+            stagedCount: stagedCount,
+            untrackedCount: untrackedCount,
+            conflictCount: conflictCount,
+            capturedAt: Date(timeIntervalSince1970: 1)
+        )
+    }
+}
