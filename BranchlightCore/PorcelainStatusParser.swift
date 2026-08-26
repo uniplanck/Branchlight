@@ -513,7 +513,7 @@ public struct GitRemoteDiscovery: Sendable {
                 throw GitEngineError.executableMissing(executableURL.path)
             }
 
-            let fetch = try runRemoteCommand(
+            let fetch = try Self.runRemoteCommand(
                 executableURL: executableURL,
                 repositoryURL: repositoryURL,
                 arguments: ["remote", "get-url", "origin"]
@@ -523,7 +523,7 @@ public struct GitRemoteDiscovery: Sendable {
             let fetchURL = fetch.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !fetchURL.isEmpty else { return nil }
 
-            let push = try runRemoteCommand(
+            let push = try Self.runRemoteCommand(
                 executableURL: executableURL,
                 repositoryURL: repositoryURL,
                 arguments: ["remote", "get-url", "--push", "origin"]
