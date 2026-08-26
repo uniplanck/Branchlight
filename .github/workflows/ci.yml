@@ -71,6 +71,50 @@ jobs:
           print(f"Verified {len(sources)} Swift source files are represented in Branchlight.xcodeproj")
           PY
 
+      - name: Verify runtime security boundaries
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import sys
+
+          finder_forbidden = {
+              "Process(": "Finder must not spawn subprocesses",
+              "URLSession": "Finder must not perform network requests",
+              "URLRequest": "Finder must not perform network requests",
+              "import Security": "Finder must not own credentials",
+              "SecItem": "Finder must not access Keychain credentials",
+              "api.github.com": "Finder must not call GitHub APIs",
+              "github.com/login": "Finder must not own OAuth flows",
+          }
+          core_forbidden = {
+              "import Security": "Core must not own Keychain credentials",
+              "SecItem": "Core must not access Keychain credentials",
+              "kSecClass": "Core must not access Keychain credentials",
+              "oauth-token": "Core must not persist OAuth credentials",
+          }
+
+          violations = []
+          for path in Path("BranchlightFinderExtension").rglob("*.swift"):
+              text = path.read_text()
+              for needle, reason in finder_forbidden.items():
+                  if needle in text:
+                      violations.append(f"{path}: {reason} ({needle!r})")
+
+          for path in Path("BranchlightCore").rglob("*.swift"):
+              text = path.read_text()
+              for needle, reason in core_forbidden.items():
+                  if needle in text:
+                      violations.append(f"{path}: {reason} ({needle!r})")
+
+          if violations:
+              print("Runtime security boundary violations:")
+              for violation in violations:
+                  print(f"  {violation}")
+              sys.exit(1)
+
+          print("Finder subprocess/network/credential boundary and Core Keychain boundary verified")
+          PY
+
       - name: Test Branchlight
         run: |
           xcodebuild \
