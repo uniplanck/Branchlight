@@ -350,6 +350,114 @@ final class GitHistoryMutationEngineTests: XCTestCase {
         XCTAssertThrowsError(try engine.revertCommit(at: fixture.repository, commitHash: "deadbeef"))
     }
 
+    func testCoordinatedHistoryServiceJournalsCherryPickAndRevert() async throws {
+        let fixture = try makeFixture(prefix: "BranchlightHistoryRuntime")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        try runGit(["checkout", "-b", "source"], at: fixture.repository)
+        try "picked\n".write(
+            to: fixture.repository.appendingPathComponent("picked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "picked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "runtime pick"], at: fixture.repository)
+        let sourceCommit = try gitOutput(["rev-parse", "HEAD"], at: fixture.repository)
+        try runGit(["checkout", "main"], at: fixture.repository)
+
+        let coordinator = GitOperationCoordinator()
+        let base = InProcessGitService(engine: engine, coordinator: coordinator, registry: GitRepositoryRegistry())
+        let historyService = CoordinatedGitHistoryMutationService(
+            engine: engine,
+            coordinator: coordinator,
+            base: base
+        )
+
+        _ = try await historyService.cherryPick(
+            at: fixture.repository,
+            commitHash: sourceCommit,
+            confirmationProvided: true
+        )
+        var records = await base.recentOperations(limit: 2)
+        let cherryPickRecord = try XCTUnwrap(records.first(where: { $0.descriptor?.intent == .cherryPick }))
+        XCTAssertEqual(cherryPickRecord.state, .succeeded)
+        XCTAssertEqual(cherryPickRecord.descriptor?.reference, sourceCommit)
+        XCTAssertEqual(cherryPickRecord.preCheckpoint?.operationMode, .normal)
+        XCTAssertEqual(cherryPickRecord.postCheckpoint?.operationMode, .normal)
+        XCTAssertNotEqual(cherryPickRecord.preCheckpoint?.headCommit, cherryPickRecord.postCheckpoint?.headCommit)
+
+        let pickedCommit = try XCTUnwrap(try engine.history(at: fixture.repository, limit: 1).first?.hash)
+        _ = try await historyService.revert(
+            at: fixture.repository,
+            commitHash: pickedCommit,
+            confirmationProvided: true
+        )
+        records = await base.recentOperations(limit: 2)
+        let revertRecord = try XCTUnwrap(records.first(where: { $0.descriptor?.intent == .revert }))
+        XCTAssertEqual(revertRecord.state, .succeeded)
+        XCTAssertEqual(revertRecord.descriptor?.reference, pickedCommit)
+        XCTAssertNotEqual(revertRecord.preCheckpoint?.headCommit, revertRecord.postCheckpoint?.headCommit)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.repository.appendingPathComponent("picked.txt").path))
+    }
+
+    func testCoordinatedCherryPickConflictJournalsFailureThenAbort() async throws {
+        let fixture = try makeFixture(prefix: "BranchlightHistoryRuntimeConflict")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        try runGit(["checkout", "-b", "source"], at: fixture.repository)
+        try "source\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "runtime source conflict"], at: fixture.repository)
+        let sourceCommit = try gitOutput(["rev-parse", "HEAD"], at: fixture.repository)
+
+        try runGit(["checkout", "main"], at: fixture.repository)
+        try "main\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "runtime main conflict"], at: fixture.repository)
+
+        let coordinator = GitOperationCoordinator()
+        let base = InProcessGitService(engine: engine, coordinator: coordinator, registry: GitRepositoryRegistry())
+        let historyService = CoordinatedGitHistoryMutationService(
+            engine: engine,
+            coordinator: coordinator,
+            base: base
+        )
+
+        do {
+            _ = try await historyService.cherryPick(
+                at: fixture.repository,
+                commitHash: sourceCommit,
+                confirmationProvided: true
+            )
+            XCTFail("Expected cherry-pick conflict.")
+        } catch {
+            // Expected: Git leaves CHERRY_PICK_HEAD and conflict stages for user resolution.
+        }
+
+        var records = await base.recentOperations(limit: 2)
+        let failed = try XCTUnwrap(records.first(where: { $0.descriptor?.intent == .cherryPick }))
+        XCTAssertEqual(failed.state, .failed)
+        XCTAssertEqual(failed.postCheckpoint?.operationMode, .cherryPicking)
+
+        _ = try await historyService.abortCherryPick(at: fixture.repository)
+        records = await base.recentOperations(limit: 2)
+        let abort = try XCTUnwrap(records.first(where: {
+            $0.descriptor?.intent == .cherryPick && $0.descriptor?.parameters["control"] == "abort"
+        }))
+        XCTAssertEqual(abort.state, .succeeded)
+        XCTAssertEqual(abort.preCheckpoint?.operationMode, .cherryPicking)
+        XCTAssertEqual(abort.postCheckpoint?.operationMode, .normal)
+        XCTAssertTrue(try engine.status(at: fixture.repository).isClean)
+    }
+
     private func makeFixture(prefix: String) throws -> (root: URL, repository: URL) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
