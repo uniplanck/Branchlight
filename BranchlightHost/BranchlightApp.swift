@@ -272,7 +272,10 @@ final class GitAIWorkbenchModel: ObservableObject {
     @Published var instruction = ""
     @Published private(set) var context: GitAIContext?
     @Published private(set) var prompt = ""
+    @Published private(set) var responseText = ""
+    @Published private(set) var responseProvider: String?
     @Published private(set) var isLoading = false
+    @Published private(set) var isRunningProvider = false
     @Published private(set) var errorMessage: String?
 
     private let service: InProcessGitService
@@ -285,6 +288,8 @@ final class GitAIWorkbenchModel: ObservableObject {
         guard let repositoryURL else {
             context = nil
             prompt = ""
+            responseText = ""
+            responseProvider = nil
             errorMessage = nil
             return
         }
@@ -322,6 +327,30 @@ final class GitAIWorkbenchModel: ObservableObject {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(prompt, forType: .string)
+    }
+
+    func runConfiguredLocalProvider() async {
+        guard !isRunningProvider else { return }
+        isRunningProvider = true
+        errorMessage = nil
+        responseText = ""
+        responseProvider = nil
+        defer { isRunningProvider = false }
+
+        do {
+            let response = try await performConfiguredLocalProvider()
+            responseText = response.text
+            responseProvider = response.provider
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func copyResponse() {
+        guard !responseText.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(responseText, forType: .string)
     }
 }
 
@@ -580,7 +609,7 @@ struct GitAIWorkbenchView: View {
                 Button("Refresh Context") {
                     Task { await ai.refresh(repositoryURL: model.repositoryURL) }
                 }
-                .disabled(model.repositoryURL == nil || ai.isLoading)
+                .disabled(model.repositoryURL == nil || ai.isLoading || ai.isRunningProvider)
                 Button("Copy Prompt") { ai.copyPrompt() }
                     .disabled(ai.prompt.isEmpty)
             }
@@ -619,28 +648,94 @@ struct GitAIWorkbenchView: View {
                 .foregroundStyle(.secondary)
             }
 
+            HStack(spacing: 10) {
+                if let providerName = ai.configuredLocalProviderName {
+                    Label(providerName, systemImage: "terminal")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label("Local provider not configured", systemImage: "terminal")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    Task { await ai.runConfiguredLocalProvider() }
+                } label: {
+                    if ai.isRunningProvider {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Running…")
+                        }
+                    } else {
+                        Label("Run Local Provider", systemImage: "play.fill")
+                    }
+                }
+                .disabled(
+                    !ai.hasConfiguredLocalProvider ||
+                    ai.context == nil ||
+                    ai.isLoading ||
+                    ai.isRunningProvider
+                )
+            }
+
             if let error = ai.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
             }
 
-            GroupBox("Generated prompt") {
-                if ai.isLoading {
-                    ProgressView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if ai.prompt.isEmpty {
-                    Text("Choose a repository and refresh its context.")
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    ScrollView([.vertical, .horizontal]) {
-                        Text(ai.prompt)
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                            .padding(8)
+            VSplitView {
+                GroupBox("Generated prompt") {
+                    if ai.isLoading {
+                        ProgressView()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if ai.prompt.isEmpty {
+                        Text("Choose a repository and refresh its context.")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ScrollView([.vertical, .horizontal]) {
+                            Text(ai.prompt)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                                .padding(8)
+                        }
                     }
                 }
+                .frame(minHeight: 220)
+
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Provider response")
+                                .font(.headline)
+                            if let provider = ai.responseProvider {
+                                Text(provider)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Copy Response") { ai.copyResponse() }
+                                .disabled(ai.responseText.isEmpty)
+                        }
+
+                        if ai.responseText.isEmpty {
+                            Text("Branchlight never applies AI output automatically. Review a provider response here before using it anywhere else.")
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        } else {
+                            ScrollView([.vertical, .horizontal]) {
+                                Text(ai.responseText)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                                    .padding(8)
+                            }
+                        }
+                    }
+                }
+                .frame(minHeight: 180)
             }
         }
         .padding(18)
