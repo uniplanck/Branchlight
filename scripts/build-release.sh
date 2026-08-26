@@ -88,6 +88,19 @@ verify_bundle() {
   test "$xpc_service_type" = "Application"
 }
 
+create_dmg() {
+  local app="$1"
+  local dmg="$2"
+  rm -f "$dmg"
+  hdiutil create \
+    -volname "Branchlight" \
+    -srcfolder "$app" \
+    -ov \
+    -format UDZO \
+    "$dmg"
+  hdiutil verify "$dmg"
+}
+
 if [[ "$MODE" == "--unsigned" ]]; then
   xcodebuild \
     -project "$PROJECT" \
@@ -102,7 +115,8 @@ if [[ "$MODE" == "--unsigned" ]]; then
 
   APP_PATH="$DERIVED_DATA/Build/Products/Release/Branchlight.app"
   verify_bundle "$APP_PATH"
-  echo "Unsigned Release readiness PASS: Branchlight $HOST_VERSION ($HOST_BUILD) + Finder Sync + Git XPC"
+  create_dmg "$APP_PATH" "$WORK_DIR/Branchlight-unsigned-readiness.dmg"
+  echo "Unsigned Release readiness PASS: Branchlight $HOST_VERSION ($HOST_BUILD) + Finder Sync + Git XPC + DMG"
   exit 0
 fi
 
@@ -147,9 +161,11 @@ fi
 mkdir -p "$OUTPUT_DIR"
 ARTIFACT_BASENAME="Branchlight-${HOST_VERSION}-build-${HOST_BUILD}-macOS"
 ZIP_PATH="$OUTPUT_DIR/${ARTIFACT_BASENAME}.zip"
-CHECKSUM_PATH="$ZIP_PATH.sha256"
+DMG_PATH="$OUTPUT_DIR/${ARTIFACT_BASENAME}.dmg"
+ZIP_CHECKSUM_PATH="$ZIP_PATH.sha256"
+DMG_CHECKSUM_PATH="$DMG_PATH.sha256"
 
-rm -f "$ZIP_PATH" "$CHECKSUM_PATH"
+rm -f "$ZIP_PATH" "$DMG_PATH" "$ZIP_CHECKSUM_PATH" "$DMG_CHECKSUM_PATH"
 ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
 
 if [[ -n "$NOTARY_PROFILE" ]]; then
@@ -163,13 +179,31 @@ if [[ -n "$NOTARY_PROFILE" ]]; then
   rm -f "$ZIP_PATH"
   ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
 else
-  echo "Notarization skipped: BRANCHLIGHT_NOTARY_KEYCHAIN_PROFILE is not set." >&2
+  echo "App notarization skipped: BRANCHLIGHT_NOTARY_KEYCHAIN_PROFILE is not set." >&2
 fi
 
-shasum -a 256 "$ZIP_PATH" > "$CHECKSUM_PATH"
+create_dmg "$APP_PATH" "$DMG_PATH"
+codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp "$DMG_PATH"
+codesign --verify --verbose=2 "$DMG_PATH"
 
-echo "Release artifact: $ZIP_PATH"
-echo "SHA-256: $(cat "$CHECKSUM_PATH")"
+if [[ -n "$NOTARY_PROFILE" ]]; then
+  xcrun notarytool submit "$DMG_PATH" \
+    --keychain-profile "$NOTARY_PROFILE" \
+    --wait
+  xcrun stapler staple "$DMG_PATH"
+  xcrun stapler validate "$DMG_PATH"
+  spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
+else
+  echo "DMG notarization skipped: BRANCHLIGHT_NOTARY_KEYCHAIN_PROFILE is not set." >&2
+fi
+
+shasum -a 256 "$ZIP_PATH" > "$ZIP_CHECKSUM_PATH"
+shasum -a 256 "$DMG_PATH" > "$DMG_CHECKSUM_PATH"
+
+echo "Release ZIP: $ZIP_PATH"
+echo "ZIP SHA-256: $(cat "$ZIP_CHECKSUM_PATH")"
+echo "Release DMG: $DMG_PATH"
+echo "DMG SHA-256: $(cat "$DMG_CHECKSUM_PATH")"
 if [[ -z "$NOTARY_PROFILE" ]]; then
   echo "SIGNED_NOT_NOTARIZED"
 else
