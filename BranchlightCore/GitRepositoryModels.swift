@@ -90,6 +90,193 @@ public struct GitRepositoryIntelligence: Codable, Hashable, Sendable {
     }
 }
 
+public enum GitMutationRisk: Int, Codable, CaseIterable, Comparable, Hashable, Sendable {
+    case safe = 0
+    case caution = 1
+    case destructive = 2
+
+    public static func < (lhs: GitMutationRisk, rhs: GitMutationRisk) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+}
+
+public enum GitMutationIntent: String, Codable, CaseIterable, Hashable, Sendable {
+    case stage
+    case unstage
+    case commit
+    case fetch
+    case pull
+    case push
+    case switchBranch
+    case stashCreate
+    case stashApply
+    case stashDrop
+    case worktreeAdd
+    case worktreeRemove
+    case merge
+    case rebase
+    case cherryPick
+    case revert
+    case resetHard
+}
+
+public enum GitSafetySignal: String, Codable, CaseIterable, Hashable, Sendable {
+    case dirtyWorkingTree
+    case untrackedFiles
+    case conflicts
+    case operationInProgress
+    case detachedHead
+    case noUpstream
+    case upstreamBehind
+    case upstreamDiverged
+}
+
+public struct GitPreflightReport: Codable, Hashable, Sendable {
+    public let intent: GitMutationIntent
+    public let risk: GitMutationRisk
+    public let signals: Set<GitSafetySignal>
+    public let blockingReasons: [String]
+    public let warnings: [String]
+
+    public init(
+        intent: GitMutationIntent,
+        risk: GitMutationRisk,
+        signals: Set<GitSafetySignal>,
+        blockingReasons: [String],
+        warnings: [String]
+    ) {
+        self.intent = intent
+        self.risk = risk
+        self.signals = signals
+        self.blockingReasons = blockingReasons
+        self.warnings = warnings
+    }
+
+    public var canProceed: Bool { blockingReasons.isEmpty }
+    public var requiresConfirmation: Bool {
+        risk != .safe || !warnings.isEmpty
+    }
+}
+
+public enum GitSafetyPreflight {
+    public static func evaluate(
+        intent: GitMutationIntent,
+        intelligence: GitRepositoryIntelligence
+    ) -> GitPreflightReport {
+        let signals = safetySignals(for: intelligence)
+        var risk = baseRisk(for: intent)
+        var blockers: [String] = []
+        var warnings: [String] = []
+
+        if signals.contains(.operationInProgress), blocksDuringOperation(intent) {
+            blockers.append("Finish or abort the current Git operation before starting this action.")
+        }
+        if signals.contains(.conflicts), blocksWithConflicts(intent) {
+            blockers.append("Resolve the current conflicts before starting this action.")
+        }
+
+        if signals.contains(.dirtyWorkingTree), warnsWhenDirty(intent) {
+            warnings.append("The working tree contains uncommitted changes.")
+            risk = max(risk, .caution)
+        }
+        if signals.contains(.untrackedFiles), warnsWhenDirty(intent) {
+            warnings.append("Untracked files are present and may affect the operation.")
+            risk = max(risk, .caution)
+        }
+        if signals.contains(.upstreamDiverged), intent == .pull || intent == .push {
+            warnings.append("Local and upstream history have diverged.")
+            risk = max(risk, .caution)
+        } else if signals.contains(.upstreamBehind), intent == .push {
+            warnings.append("The upstream branch contains commits that are not local.")
+            risk = max(risk, .caution)
+        }
+        if signals.contains(.noUpstream), intent == .pull || intent == .push {
+            warnings.append("The current branch has no configured upstream.")
+            risk = max(risk, .caution)
+        }
+        if signals.contains(.detachedHead), requiresBranchContext(intent) {
+            warnings.append("HEAD is detached; branch-oriented behavior may be surprising.")
+            risk = max(risk, .caution)
+        }
+        if !blockers.isEmpty {
+            risk = max(risk, .caution)
+        }
+
+        return GitPreflightReport(
+            intent: intent,
+            risk: risk,
+            signals: signals,
+            blockingReasons: blockers,
+            warnings: warnings
+        )
+    }
+
+    private static func safetySignals(for intelligence: GitRepositoryIntelligence) -> Set<GitSafetySignal> {
+        var signals: Set<GitSafetySignal> = []
+        if intelligence.changedCount > 0 { signals.insert(.dirtyWorkingTree) }
+        if intelligence.untrackedCount > 0 { signals.insert(.untrackedFiles) }
+        if intelligence.conflictCount > 0 { signals.insert(.conflicts) }
+        if intelligence.operationMode != .normal { signals.insert(.operationInProgress) }
+        if intelligence.isDetachedHead { signals.insert(.detachedHead) }
+        if intelligence.upstream == nil { signals.insert(.noUpstream) }
+        if let tracking = intelligence.tracking {
+            if tracking.behind > 0 { signals.insert(.upstreamBehind) }
+            if tracking.isDiverged { signals.insert(.upstreamDiverged) }
+        }
+        return signals
+    }
+
+    private static func baseRisk(for intent: GitMutationIntent) -> GitMutationRisk {
+        switch intent {
+        case .fetch, .stage, .unstage, .commit, .push, .stashCreate, .worktreeAdd:
+            return .safe
+        case .pull, .switchBranch, .stashApply, .merge, .rebase, .cherryPick, .revert:
+            return .caution
+        case .stashDrop, .worktreeRemove, .resetHard:
+            return .destructive
+        }
+    }
+
+    private static func blocksDuringOperation(_ intent: GitMutationIntent) -> Bool {
+        switch intent {
+        case .fetch, .stage, .unstage, .commit, .push, .stashCreate:
+            return false
+        case .pull, .switchBranch, .stashApply, .stashDrop, .worktreeAdd, .worktreeRemove,
+             .merge, .rebase, .cherryPick, .revert, .resetHard:
+            return true
+        }
+    }
+
+    private static func blocksWithConflicts(_ intent: GitMutationIntent) -> Bool {
+        switch intent {
+        case .fetch, .stage, .unstage, .commit, .push:
+            return false
+        case .pull, .switchBranch, .stashCreate, .stashApply, .stashDrop, .worktreeAdd, .worktreeRemove,
+             .merge, .rebase, .cherryPick, .revert, .resetHard:
+            return true
+        }
+    }
+
+    private static func warnsWhenDirty(_ intent: GitMutationIntent) -> Bool {
+        switch intent {
+        case .pull, .switchBranch, .stashApply, .merge, .rebase, .cherryPick, .revert, .resetHard:
+            return true
+        case .stage, .unstage, .commit, .fetch, .push, .stashCreate, .stashDrop, .worktreeAdd, .worktreeRemove:
+            return false
+        }
+    }
+
+    private static func requiresBranchContext(_ intent: GitMutationIntent) -> Bool {
+        switch intent {
+        case .pull, .push, .switchBranch, .merge, .rebase:
+            return true
+        case .stage, .unstage, .commit, .fetch, .stashCreate, .stashApply, .stashDrop,
+             .worktreeAdd, .worktreeRemove, .cherryPick, .revert, .resetHard:
+            return false
+        }
+    }
+}
+
 public enum GitOperationState: String, Codable, Hashable, Sendable {
     case running
     case succeeded
