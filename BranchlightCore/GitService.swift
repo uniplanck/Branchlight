@@ -221,6 +221,13 @@ public protocol GitService: Sendable {
     func push(at repositoryURL: URL) async throws -> GitCommandResult
     func branches(at repositoryURL: URL) async throws -> [GitBranch]
     func switchBranch(at repositoryURL: URL, name: String) async throws
+    func merge(at repositoryURL: URL, branch: String, confirmationProvided: Bool) async throws -> GitCommandResult
+    func continueMerge(at repositoryURL: URL) async throws -> GitCommandResult
+    func abortMerge(at repositoryURL: URL) async throws -> GitCommandResult
+    func rebase(at repositoryURL: URL, onto branch: String, confirmationProvided: Bool) async throws -> GitCommandResult
+    func continueRebase(at repositoryURL: URL) async throws -> GitCommandResult
+    func abortRebase(at repositoryURL: URL) async throws -> GitCommandResult
+    func skipRebase(at repositoryURL: URL) async throws -> GitCommandResult
     func history(at repositoryURL: URL, limit: Int) async throws -> [GitCommit]
     func fileHistory(at repositoryURL: URL, path: String, limit: Int) async throws -> [GitCommit]
     func blame(at repositoryURL: URL, path: String) async throws -> [GitBlameLine]
@@ -390,6 +397,101 @@ public struct InProcessGitService: GitService, Sendable {
             descriptor: GitOperationDescriptor(intent: .switchBranch, target: name)
         ) { engine, root in
             try engine.switchBranch(at: root, name: name)
+        }
+    }
+
+    public func merge(
+        at repositoryURL: URL,
+        branch: String,
+        confirmationProvided: Bool
+    ) async throws -> GitCommandResult {
+        try await mutate(
+            at: repositoryURL,
+            label: "merge \(branch)",
+            descriptor: GitOperationDescriptor(
+                intent: .merge,
+                reference: branch,
+                parameters: ["control": "start"]
+            ),
+            confirmationProvided: confirmationProvided
+        ) { engine, root in
+            try engine.merge(at: root, branch: branch)
+        }
+    }
+
+    public func continueMerge(at repositoryURL: URL) async throws -> GitCommandResult {
+        try await controlAdvancedOperation(
+            at: repositoryURL,
+            label: "continue merge",
+            descriptor: GitOperationDescriptor(intent: .merge, parameters: ["control": "continue"]),
+            expectedMode: .merging,
+            requiresResolvedConflicts: true
+        ) { engine, root in
+            try engine.continueMerge(at: root)
+        }
+    }
+
+    public func abortMerge(at repositoryURL: URL) async throws -> GitCommandResult {
+        try await controlAdvancedOperation(
+            at: repositoryURL,
+            label: "abort merge",
+            descriptor: GitOperationDescriptor(intent: .merge, parameters: ["control": "abort"]),
+            expectedMode: .merging
+        ) { engine, root in
+            try engine.abortMerge(at: root)
+        }
+    }
+
+    public func rebase(
+        at repositoryURL: URL,
+        onto branch: String,
+        confirmationProvided: Bool
+    ) async throws -> GitCommandResult {
+        try await mutate(
+            at: repositoryURL,
+            label: "rebase onto \(branch)",
+            descriptor: GitOperationDescriptor(
+                intent: .rebase,
+                reference: branch,
+                parameters: ["control": "start"]
+            ),
+            confirmationProvided: confirmationProvided
+        ) { engine, root in
+            try engine.rebase(at: root, onto: branch)
+        }
+    }
+
+    public func continueRebase(at repositoryURL: URL) async throws -> GitCommandResult {
+        try await controlAdvancedOperation(
+            at: repositoryURL,
+            label: "continue rebase",
+            descriptor: GitOperationDescriptor(intent: .rebase, parameters: ["control": "continue"]),
+            expectedMode: .rebasing,
+            requiresResolvedConflicts: true
+        ) { engine, root in
+            try engine.continueRebase(at: root)
+        }
+    }
+
+    public func abortRebase(at repositoryURL: URL) async throws -> GitCommandResult {
+        try await controlAdvancedOperation(
+            at: repositoryURL,
+            label: "abort rebase",
+            descriptor: GitOperationDescriptor(intent: .rebase, parameters: ["control": "abort"]),
+            expectedMode: .rebasing
+        ) { engine, root in
+            try engine.abortRebase(at: root)
+        }
+    }
+
+    public func skipRebase(at repositoryURL: URL) async throws -> GitCommandResult {
+        try await controlAdvancedOperation(
+            at: repositoryURL,
+            label: "skip rebase commit",
+            descriptor: GitOperationDescriptor(intent: .rebase, parameters: ["control": "skip"]),
+            expectedMode: .rebasing
+        ) { engine, root in
+            try engine.skipRebase(at: root)
         }
     }
 
@@ -603,15 +705,12 @@ public struct InProcessGitService: GitService, Sendable {
         at repositoryURL: URL,
         label: String,
         descriptor: GitOperationDescriptor,
+        confirmationProvided: Bool? = nil,
         operation: @escaping @Sendable (SystemGitEngine, URL) throws -> T
     ) async throws -> T {
         let identity = try await repositoryIdentity(at: repositoryURL)
         let engine = engine
-        let checkpointProvider: @Sendable () async -> GitRepositoryCheckpoint? = {
-            await Task.detached(priority: .utility) {
-                try? Self.captureCheckpoint(executableURL: engine.executableURL, identity: identity)
-            }.value
-        }
+        let checkpointProvider = Self.checkpointProvider(engine: engine, identity: identity)
         return try await coordinator.run(
             repository: identity,
             label: label,
@@ -621,8 +720,58 @@ public struct InProcessGitService: GitService, Sendable {
             try await Task.detached(priority: .userInitiated) {
                 let intelligence = try Self.captureIntelligence(engine: engine, identity: identity)
                 let report = GitSafetyPreflight.evaluate(intent: descriptor.intent, intelligence: intelligence)
-                guard report.canProceed else {
+
+                if let confirmationProvided {
+                    let admission = GitMutationAdmission(
+                        report: report,
+                        confirmationProvided: confirmationProvided
+                    )
+                    switch admission.state {
+                    case .allowed:
+                        break
+                    case .confirmationRequired:
+                        throw GitMutationAdmissionError.confirmationRequired(report)
+                    case .blocked:
+                        throw GitMutationAdmissionError.blocked(report)
+                    }
+                } else if !report.canProceed {
                     throw GitMutationAdmissionError.blocked(report)
+                }
+
+                return try operation(engine, identity.repositoryURL)
+            }.value
+        }
+    }
+
+    private func controlAdvancedOperation<T: Sendable>(
+        at repositoryURL: URL,
+        label: String,
+        descriptor: GitOperationDescriptor,
+        expectedMode: GitRepositoryOperationMode,
+        requiresResolvedConflicts: Bool = false,
+        operation: @escaping @Sendable (SystemGitEngine, URL) throws -> T
+    ) async throws -> T {
+        let identity = try await repositoryIdentity(at: repositoryURL)
+        let engine = engine
+        let checkpointProvider = Self.checkpointProvider(engine: engine, identity: identity)
+
+        return try await coordinator.run(
+            repository: identity,
+            label: label,
+            descriptor: descriptor,
+            checkpointProvider: checkpointProvider
+        ) {
+            try await Task.detached(priority: .userInitiated) {
+                let intelligence = try Self.captureIntelligence(engine: engine, identity: identity)
+                guard intelligence.operationMode == expectedMode else {
+                    throw GitEngineError.invalidInput(
+                        "The requested control action requires an active \(expectedMode.rawValue) operation."
+                    )
+                }
+                if requiresResolvedConflicts, intelligence.conflictCount > 0 {
+                    throw GitEngineError.invalidInput(
+                        "Resolve and stage all conflicts before continuing the Git operation."
+                    )
                 }
                 return try operation(engine, identity.repositoryURL)
             }.value
@@ -633,6 +782,17 @@ public struct InProcessGitService: GitService, Sendable {
         _ operation: @escaping @Sendable () throws -> T
     ) async throws -> T {
         try await Task.detached(priority: .userInitiated, operation: operation).value
+    }
+
+    private static func checkpointProvider(
+        engine: SystemGitEngine,
+        identity: GitRepositoryIdentity
+    ) -> @Sendable () async -> GitRepositoryCheckpoint? {
+        {
+            await Task.detached(priority: .utility) {
+                try? Self.captureCheckpoint(executableURL: engine.executableURL, identity: identity)
+            }.value
+        }
     }
 
     private static func resolveRepositoryIdentity(
