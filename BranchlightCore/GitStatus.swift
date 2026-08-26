@@ -385,6 +385,34 @@ public extension SystemGitEngine {
         return GitConflictFile(path: path, base: base, ours: ours, theirs: theirs, result: result)
     }
 
+    @discardableResult
+    func resolveConflict(
+        at repositoryURL: URL,
+        path: String,
+        result: String,
+        maximumBytes: Int = 2 * 1024 * 1024
+    ) throws -> GitStatusSnapshot {
+        let root = try repositoryRoot(for: repositoryURL).standardizedFileURL
+        _ = try conflictFile(at: root, path: path, maximumBytes: maximumBytes)
+
+        let data = Data(result.utf8)
+        try validateConflictTextData(data, path: path, maximumBytes: maximumBytes)
+        let resultURL = try validatedConflictPath(path, root: root)
+        let permissions = (try? FileManager.default.attributesOfItem(atPath: resultURL.path)[.posixPermissions])
+
+        try data.write(to: resultURL, options: [.atomic])
+        if let permissions {
+            try? FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: resultURL.path)
+        }
+
+        try stage(at: root, paths: [path])
+        let resolvedSnapshot = try status(at: root)
+        guard !resolvedSnapshot.paths.contains(where: { $0.path == path && $0.kind == .conflicted }) else {
+            throw GitEngineError.invalidOutput("Git still reports \(path) as conflicted after staging the resolution.")
+        }
+        return resolvedSnapshot
+    }
+
     private func validatedConflictPath(_ path: String, root: URL) throws -> URL {
         guard !path.isEmpty, path != ".", !path.hasPrefix("/"), !path.contains("\0") else {
             throw GitConflictWorkspaceError.invalidPath(path)
