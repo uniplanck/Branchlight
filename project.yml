@@ -39,6 +39,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight
         PRODUCT_NAME: Branchlight
         CODE_SIGN_ENTITLEMENTS: BranchlightHost/BranchlightHost.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
     dependencies:
       - target: BranchlightCore
       - target: BranchlightFinderExtension
@@ -65,6 +66,7 @@ targets:
         PRODUCT_NAME: BranchlightFinderExtension
         CODE_SIGN_ENTITLEMENTS: BranchlightFinderExtension/BranchlightFinderExtension.entitlements
         APPLICATION_EXTENSION_API_ONLY: YES
+        ENABLE_HARDENED_RUNTIME: YES
         SKIP_INSTALL: YES
     dependencies:
       - target: BranchlightCore
