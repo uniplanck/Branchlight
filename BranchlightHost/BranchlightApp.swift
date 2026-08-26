@@ -26,6 +26,7 @@ struct BranchlightApp: App {
             ContentView()
                 .environmentObject(model)
                 .environmentObject(githubModel)
+                .accessibilityIdentifier("branchlight.main")
                 .frame(minWidth: 720, minHeight: 500)
                 .onAppear {
                     model.consumeFinderRequest()
@@ -43,6 +44,7 @@ struct BranchlightApp: App {
             GitHubLiveView()
                 .environmentObject(model)
                 .environmentObject(githubModel)
+                .accessibilityIdentifier("branchlight.github-live")
                 .frame(minWidth: 760, minHeight: 560)
         }
         .defaultSize(width: 900, height: 680)
@@ -51,6 +53,7 @@ struct BranchlightApp: App {
             GitAIWorkbenchView()
                 .environmentObject(model)
                 .environmentObject(aiModel)
+                .accessibilityIdentifier("branchlight.ai-workbench")
                 .frame(minWidth: 760, minHeight: 580)
         }
         .defaultSize(width: 920, height: 720)
@@ -63,6 +66,37 @@ struct BranchlightCommands: Commands {
 
     var body: some Commands {
         CommandMenu("Branchlight") {
+            Button("Add Repository…") {
+                model.chooseRepository()
+            }
+            .keyboardShortcut("o", modifiers: [.command])
+
+            Button("Refresh Repository") {
+                Task { await model.refresh() }
+            }
+            .keyboardShortcut("r", modifiers: [.command])
+            .disabled(model.repositoryURL == nil || model.isRefreshing)
+
+            Divider()
+
+            Button("Changes") { model.requestedTab = 0 }
+                .keyboardShortcut("1", modifiers: [.command])
+                .disabled(model.repositoryURL == nil)
+            Button("Diff") { model.requestedTab = 1 }
+                .keyboardShortcut("2", modifiers: [.command])
+                .disabled(model.repositoryURL == nil)
+            Button("History") { model.requestedTab = 2 }
+                .keyboardShortcut("3", modifiers: [.command])
+                .disabled(model.repositoryURL == nil)
+            Button("Branches") { model.requestedTab = 3 }
+                .keyboardShortcut("4", modifiers: [.command])
+                .disabled(model.repositoryURL == nil)
+            Button("Conflicts") { model.requestedTab = 4 }
+                .keyboardShortcut("5", modifiers: [.command])
+                .disabled(model.repositoryURL == nil)
+
+            Divider()
+
             Button("GitHub Live") {
                 openWindow(id: "github-live")
             }
@@ -425,6 +459,7 @@ struct GitHubLiveView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
             }
+            .accessibilityLabel("Refresh GitHub data")
             .disabled(github.isLoading || model.repositoryURL == nil)
         }
     }
@@ -439,6 +474,7 @@ struct GitHubLiveView: View {
                     Text(authorization.userCode)
                         .font(.system(.title3, design: .monospaced).weight(.semibold))
                         .textSelection(.enabled)
+                        .accessibilityLabel("GitHub device authorization code \(authorization.userCode)")
                 }
                 Spacer()
                 Link("Open GitHub", destination: authorization.verificationURL)
@@ -499,6 +535,9 @@ struct GitHubLiveView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .accessibilityLabel(
+                        "Pull request \(pullRequest.number), \(pullRequest.title), \(pullRequest.headBranch) to \(pullRequest.baseBranch), by \(pullRequest.author)"
+                    )
                     .buttonStyle(.plain)
                 }
             }
@@ -522,6 +561,7 @@ struct GitHubLiveView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
+                            .accessibilityElement(children: .combine)
                         }
                     }
                     .padding(.vertical, 4)
@@ -541,6 +581,7 @@ struct GitHubLiveView: View {
                         if github.reviewedPullRequestNumber != selectedPullRequestNumber {
                             ProgressView()
                                 .controlSize(.small)
+                                .accessibilityLabel("Loading reviews")
                         } else if github.reviews.isEmpty {
                             Text("No submitted reviews")
                                 .foregroundStyle(.secondary)
@@ -556,6 +597,7 @@ struct GitHubLiveView: View {
                                             .lineLimit(3)
                                     }
                                 }
+                                .accessibilityElement(children: .combine)
                             }
                         }
                     }
@@ -621,10 +663,12 @@ struct GitAIWorkbenchView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .accessibilityLabel("AI task")
                 .onChange(of: ai.intent) { _ in ai.rebuildPrompt() }
 
                 TextField("Optional instruction", text: $ai.instruction)
                     .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Optional AI instruction")
                     .onSubmit { ai.rebuildPrompt() }
                     .onChange(of: ai.instruction) { _ in ai.rebuildPrompt() }
             }
@@ -646,6 +690,7 @@ struct GitAIWorkbenchView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
             }
 
             HStack(spacing: 10) {
@@ -671,6 +716,7 @@ struct GitAIWorkbenchView: View {
                         Label("Run Local Provider", systemImage: "play.fill")
                     }
                 }
+                .accessibilityLabel(ai.isRunningProvider ? "Local AI provider running" : "Run local AI provider")
                 .disabled(
                     !ai.hasConfiguredLocalProvider ||
                     ai.context == nil ||
@@ -682,12 +728,14 @@ struct GitAIWorkbenchView: View {
             if let error = ai.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
+                    .accessibilityLabel("AI Workbench error: \(error)")
             }
 
             VSplitView {
                 GroupBox("Generated prompt") {
                     if ai.isLoading {
                         ProgressView()
+                            .accessibilityLabel("Loading sanitized repository context")
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else if ai.prompt.isEmpty {
                         Text("Choose a repository and refresh its context.")
@@ -698,6 +746,7 @@ struct GitAIWorkbenchView: View {
                             Text(ai.prompt)
                                 .font(.system(.caption, design: .monospaced))
                                 .textSelection(.enabled)
+                                .accessibilityLabel("Generated AI prompt")
                                 .frame(maxWidth: .infinity, alignment: .topLeading)
                                 .padding(8)
                         }
@@ -729,6 +778,7 @@ struct GitAIWorkbenchView: View {
                                 Text(ai.responseText)
                                     .font(.system(.body, design: .monospaced))
                                     .textSelection(.enabled)
+                                    .accessibilityLabel("AI provider response")
                                     .frame(maxWidth: .infinity, alignment: .topLeading)
                                     .padding(8)
                             }
