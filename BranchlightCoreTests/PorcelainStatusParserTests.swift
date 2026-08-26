@@ -121,8 +121,9 @@ final class GitSafetyRuntimeIntegrationTests: XCTestCase {
         try await service.stage(at: fixture.repository, paths: ["tracked.txt"])
         _ = try await service.commit(at: fixture.repository, message: "recoverable change", amend: false)
 
+        let sourceRecords = await service.recentOperations(limit: 3)
         let sourceRecord = try XCTUnwrap(
-            await service.recentOperations(limit: 3).first(where: { $0.descriptor?.intent == .commit })
+            sourceRecords.first(where: { $0.descriptor?.intent == .commit })
         )
         let createdCommit = try XCTUnwrap(sourceRecord.postCheckpoint?.headCommit)
         let plan = GitRecoveryPlanner.plan(for: sourceRecord)
@@ -143,8 +144,9 @@ final class GitSafetyRuntimeIntegrationTests: XCTestCase {
         XCTAssertNotEqual(history[0].hash, createdCommit)
         XCTAssertTrue(history[0].subject.localizedCaseInsensitiveContains("revert"))
 
+        let recoveryRecords = await service.recentOperations(limit: 3)
         let recoveryRecord = try XCTUnwrap(
-            await service.recentOperations(limit: 3).first(where: {
+            recoveryRecords.first(where: {
                 $0.descriptor?.parameters["recoveryOf"] == sourceRecord.id.uuidString
             })
         )
@@ -166,8 +168,9 @@ final class GitSafetyRuntimeIntegrationTests: XCTestCase {
         )
         try await service.stage(at: fixture.repository, paths: ["tracked.txt"])
         _ = try await service.commit(at: fixture.repository, message: "first recoverable", amend: false)
+        let sourceRecords = await service.recentOperations(limit: 3)
         let sourceRecord = try XCTUnwrap(
-            await service.recentOperations(limit: 3).first(where: { $0.descriptor?.intent == .commit })
+            sourceRecords.first(where: { $0.descriptor?.intent == .commit })
         )
 
         try "later\n".write(
