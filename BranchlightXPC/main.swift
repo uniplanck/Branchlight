@@ -130,6 +130,102 @@ private final class BranchlightGitXPCService: NSObject, BranchlightGitXPCProtoco
         }
     }
 
+    func recoveryCandidates(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?, NSError?) -> Void
+    ) {
+        let replyBox = XPCReplyBox(reply)
+        let gitService = gitService
+
+        Task { @Sendable in
+            do {
+                let request = try GitXPCCodec.decode(
+                    GitXPCRecoveryCandidatesRequest.self,
+                    from: requestData
+                )
+                try GitXPCCodec.validateProtocolVersion(request.protocolVersion)
+                let repositoryURL = try Self.validatedRepositoryURL(request.repositoryPath)
+                let identity = try await gitService.repositoryIdentity(at: repositoryURL)
+                let records = await gitService.recentOperations(limit: request.limit)
+
+                let candidates = records.compactMap { record -> GitXPCRecoveryCandidate? in
+                    guard record.repository.coordinationKey == identity.coordinationKey,
+                          let descriptor = record.descriptor else {
+                        return nil
+                    }
+                    let plan = GitRecoveryPlanner.plan(for: record)
+                    guard plan.availability == .validationRequired else { return nil }
+                    return GitXPCRecoveryCandidate(
+                        operationID: record.id,
+                        label: record.label,
+                        intent: descriptor.intent,
+                        affectedPaths: plan.affectedPaths,
+                        target: plan.target,
+                        reason: plan.reason
+                    )
+                }
+
+                let response = GitXPCRecoveryCandidatesResponse(
+                    requestID: request.requestID,
+                    candidates: candidates
+                )
+                replyBox.send(try GitXPCCodec.encode(response), error: nil)
+            } catch {
+                replyBox.send(nil, error: error as NSError)
+            }
+        }
+    }
+
+    func executeRecovery(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?, NSError?) -> Void
+    ) {
+        let replyBox = XPCReplyBox(reply)
+        let gitService = gitService
+
+        Task { @Sendable in
+            do {
+                let request = try GitXPCCodec.decode(
+                    GitXPCRecoveryExecuteRequest.self,
+                    from: requestData
+                )
+                try GitXPCCodec.validateProtocolVersion(request.protocolVersion)
+                let repositoryURL = try Self.validatedRepositoryURL(request.repositoryPath)
+                let identity = try await gitService.repositoryIdentity(at: repositoryURL)
+                let records = await gitService.recentOperations(limit: 200)
+                guard let record = records.first(where: {
+                    $0.id == request.operationID &&
+                    $0.repository.coordinationKey == identity.coordinationKey
+                }) else {
+                    throw GitEngineError.invalidInput(
+                        "The requested recovery operation is no longer available in the XPC journal."
+                    )
+                }
+
+                let action = try await gitService.executeRecovery(for: record)
+                let outcome: GitXPCRecoveryOutcome
+                switch action {
+                case .restoreIndex:
+                    outcome = .exactIndexRestored
+                case .switchBranch:
+                    outcome = .branchSwitched
+                case .revertCommit:
+                    outcome = .revertCreated
+                case .removeWorktree:
+                    outcome = .worktreeRemoved
+                }
+
+                let response = GitXPCRecoveryExecuteResponse(
+                    requestID: request.requestID,
+                    outcome: outcome
+                )
+                replyBox.send(try GitXPCCodec.encode(response), error: nil)
+            } catch {
+                replyBox.send(nil, error: error as NSError)
+            }
+        }
+    }
+
     private static func execute(
         _ mutation: GitXPCMutation,
         repositoryURL: URL,
