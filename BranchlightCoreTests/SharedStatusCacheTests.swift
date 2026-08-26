@@ -36,6 +36,48 @@ final class SharedStatusCacheTests: XCTestCase {
         XCTAssertEqual(reloaded.statusKind(forAbsolutePath: "/tmp/example-repo/Sources"), .modified)
     }
 
+    func testPersistsRepositoryIntelligenceWithSnapshotAtomically() throws {
+        let (cache, directory) = try makeCache()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let root = "/tmp/intelligent-repo"
+        let snapshot = GitStatusSnapshot(
+            repositoryRoot: root,
+            branch: "feature/runtime",
+            isDetachedHead: false,
+            paths: [
+                GitPathStatus(path: "A.swift", indexCode: "M", workTreeCode: " ", kind: .staged),
+                GitPathStatus(path: "B.swift", indexCode: " ", workTreeCode: "M", kind: .modified)
+            ]
+        )
+        let intelligence = GitRepositoryIntelligence(
+            identity: GitRepositoryIdentity(
+                workingTreeRoot: root,
+                gitDirectory: "\(root)/.git",
+                commonGitDirectory: "\(root)/.git"
+            ),
+            branch: "feature/runtime",
+            upstream: "origin/feature/runtime",
+            tracking: GitAheadBehind(ahead: 2, behind: 1),
+            isDetachedHead: false,
+            operationMode: .rebasing,
+            changedCount: 2,
+            stagedCount: 1,
+            untrackedCount: 0,
+            conflictCount: 0,
+            capturedAt: Date(timeIntervalSince1970: 456)
+        )
+
+        let written = try cache.replaceRepositoryState(snapshot: snapshot, intelligence: intelligence)
+        let reloaded = cache.load()
+
+        XCTAssertEqual(written.revision, 1)
+        XCTAssertEqual(reloaded.snapshots[root]?.branch, "feature/runtime")
+        XCTAssertEqual(reloaded.intelligence(forRepositoryRoot: root), intelligence)
+        XCTAssertEqual(reloaded.intelligence(forRepositoryRoot: root)?.tracking?.summary, "↑2 ↓1")
+        XCTAssertEqual(reloaded.monitoredRoots, [root])
+    }
+
     func testPendingFinderPathIsConsumedOnce() throws {
         let (cache, directory) = try makeCache()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -107,6 +149,7 @@ final class SharedStatusCacheTests: XCTestCase {
         let migrated = cache.load()
         XCTAssertEqual(migrated.revision, 41)
         XCTAssertEqual(migrated.monitoredRoots, ["/tmp/legacy-repo"])
+        XCTAssertNil(migrated.repositoryIntelligence)
 
         try FileManager.default.removeItem(at: legacyPreferencesURL)
         let reloaded = cache.load()
