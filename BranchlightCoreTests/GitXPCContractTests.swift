@@ -40,6 +40,41 @@ final class GitXPCContractTests: XCTestCase {
         XCTAssertEqual(decoded.identity, identity)
     }
 
+    func testRepositoryIntelligenceResponseRoundTrips() throws {
+        let requestID = UUID(uuidString: "12345678-1234-5678-1234-567812345678")!
+        let identity = GitRepositoryIdentity(
+            workingTreeRoot: "/tmp/repo",
+            gitDirectory: "/tmp/repo/.git",
+            commonGitDirectory: "/tmp/repo/.git"
+        )
+        let intelligence = GitRepositoryIntelligence(
+            identity: identity,
+            branch: "main",
+            upstream: "origin/main",
+            tracking: GitAheadBehind(ahead: 2, behind: 1),
+            isDetachedHead: false,
+            operationMode: .normal,
+            changedCount: 3,
+            stagedCount: 1,
+            untrackedCount: 1,
+            conflictCount: 0,
+            capturedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let response = GitXPCRepositoryIntelligenceResponse(
+            requestID: requestID,
+            intelligence: intelligence
+        )
+
+        let decoded = try GitXPCCodec.decode(
+            GitXPCRepositoryIntelligenceResponse.self,
+            from: GitXPCCodec.encode(response)
+        )
+
+        XCTAssertEqual(decoded.requestID, requestID)
+        XCTAssertEqual(decoded.intelligence, intelligence)
+        XCTAssertEqual(decoded.protocolVersion, BranchlightGitXPCContract.protocolVersion)
+    }
+
     func testProtocolVersionMismatchFailsClosed() {
         XCTAssertThrowsError(
             try GitXPCCodec.validateProtocolVersion(
