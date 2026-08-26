@@ -165,13 +165,17 @@ jobs:
               "codesign --verify --deep --strict",
               "xcrun notarytool submit",
               "xcrun stapler staple",
+              "hdiutil create",
+              "hdiutil verify",
+              ".dmg",
+              "spctl --assess --type open",
               "shasum -a 256",
           ]:
               if needle not in release_script:
                   print(f"Release script lost required safety step: {needle}")
                   sys.exit(1)
 
-          print("Release SoT, bundled XPC, app-hosted XPC E2E and signed/notarized pipeline invariants verified")
+          print("Release SoT, bundled XPC, app-hosted XPC E2E, DMG and signed/notarized pipeline invariants verified")
           PY
 
       - name: Test Branchlight
