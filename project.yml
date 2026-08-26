@@ -44,6 +44,7 @@ targets:
       - target: BranchlightCore
       - target: BranchlightFinderExtension
         embed: true
+      - target: BranchlightGitService
 
   BranchlightFinderExtension:
     type: app-extension
@@ -66,6 +67,28 @@ targets:
         PRODUCT_NAME: BranchlightFinderExtension
         CODE_SIGN_ENTITLEMENTS: BranchlightFinderExtension/BranchlightFinderExtension.entitlements
         APPLICATION_EXTENSION_API_ONLY: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        SKIP_INSTALL: YES
+    dependencies:
+      - target: BranchlightCore
+
+  BranchlightGitService:
+    type: xpc-service
+    platform: macOS
+    sources:
+      - path: BranchlightXPC
+    info:
+      path: BranchlightXPC/Info.plist
+      properties:
+        CFBundleDisplayName: Branchlight Git Service
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        XPCService:
+          ServiceType: Application
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight.GitService
+        PRODUCT_NAME: BranchlightGitService
         ENABLE_HARDENED_RUNTIME: YES
         SKIP_INSTALL: YES
     dependencies:
