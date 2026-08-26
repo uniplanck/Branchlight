@@ -113,6 +113,7 @@ public enum GitRecoveryValidationIssue: String, Codable, CaseIterable, Hashable,
     case operationInProgress
     case workingTreeNotClean
     case unsupportedExactIndexRestore
+    case missingExactIndexSnapshot
     case missingRecoveryTarget
 }
 
@@ -127,6 +128,7 @@ public struct GitRecoveryValidation: Codable, Hashable, Sendable {
 }
 
 public enum GitRecoveryAction: Codable, Hashable, Sendable {
+    case restoreIndex(GitIndexSnapshot)
     case switchBranch(String)
     case revertCommit(String)
     case removeWorktree(String)
@@ -185,10 +187,15 @@ public enum GitRecoveryValidator {
 
         switch plan.inverseIntent {
         case .stage, .unstage:
-            // A tree hash proves index equality but does not preserve every index-only bit
-            // (for example intent-to-add/sparse-index details). Until the actual index is
-            // durably checkpointed, an automatic exact restore would over-promise safety.
-            issues.insert(.unsupportedExactIndexRestore)
+            guard sourceRecord.preCheckpoint?.indexSnapshot != nil,
+                  let expectedPostIndex = post.indexSnapshot,
+                  let currentIndex = currentCheckpoint.indexSnapshot else {
+                issues.insert(.missingExactIndexSnapshot)
+                break
+            }
+            if currentIndex != expectedPostIndex {
+                issues.insert(.indexChanged)
+            }
         case .switchBranch, .revert:
             if let currentStatus, !currentStatus.isClean {
                 issues.insert(.workingTreeNotClean)
@@ -224,16 +231,27 @@ public enum GitRecoveryValidator {
         guard validation.isValid else {
             throw GitRecoveryValidationError.rejected(validation.issues)
         }
-        guard let target = plan.target else {
-            throw GitRecoveryValidationError.rejected([.missingRecoveryTarget])
-        }
 
         switch plan.inverseIntent {
+        case .stage, .unstage:
+            guard let snapshot = sourceRecord.preCheckpoint?.indexSnapshot else {
+                throw GitRecoveryValidationError.rejected([.missingExactIndexSnapshot])
+            }
+            return .restoreIndex(snapshot)
         case .switchBranch:
+            guard let target = plan.target else {
+                throw GitRecoveryValidationError.rejected([.missingRecoveryTarget])
+            }
             return .switchBranch(target)
         case .revert:
+            guard let target = plan.target else {
+                throw GitRecoveryValidationError.rejected([.missingRecoveryTarget])
+            }
             return .revertCommit(target)
         case .worktreeRemove:
+            guard let target = plan.target else {
+                throw GitRecoveryValidationError.rejected([.missingRecoveryTarget])
+            }
             return .removeWorktree(target)
         default:
             throw GitRecoveryValidationError.rejected([.unavailablePlan])
