@@ -100,3 +100,167 @@ public enum GitStatusClassifier {
         kinds.max(by: { priority($0) < priority($1) }) ?? .clean
     }
 }
+
+public enum GitRecoveryValidationIssue: String, Codable, CaseIterable, Hashable, Sendable {
+    case unavailablePlan
+    case sourceOperationMismatch
+    case operationNotSucceeded
+    case missingPostCheckpoint
+    case headChanged
+    case indexChanged
+    case branchChanged
+    case detachedHeadChanged
+    case operationInProgress
+    case workingTreeNotClean
+    case unsupportedExactIndexRestore
+    case missingRecoveryTarget
+}
+
+public struct GitRecoveryValidation: Codable, Hashable, Sendable {
+    public let issues: Set<GitRecoveryValidationIssue>
+
+    public init(issues: Set<GitRecoveryValidationIssue>) {
+        self.issues = issues
+    }
+
+    public var isValid: Bool { issues.isEmpty }
+}
+
+public enum GitRecoveryAction: Codable, Hashable, Sendable {
+    case switchBranch(String)
+    case revertCommit(String)
+    case removeWorktree(String)
+}
+
+public enum GitRecoveryValidationError: LocalizedError, Sendable {
+    case rejected(Set<GitRecoveryValidationIssue>)
+
+    public var errorDescription: String? {
+        switch self {
+        case .rejected(let issues):
+            return "Recovery validation failed: \(issues.map(\.rawValue).sorted().joined(separator: ", "))."
+        }
+    }
+}
+
+public enum GitRecoveryValidator {
+    public static func validate(
+        plan: GitRecoveryPlan,
+        sourceRecord: GitOperationRecord,
+        currentCheckpoint: GitRepositoryCheckpoint,
+        currentStatus: GitStatusSnapshot? = nil
+    ) -> GitRecoveryValidation {
+        var issues: Set<GitRecoveryValidationIssue> = []
+
+        guard plan.availability == .validationRequired else {
+            return GitRecoveryValidation(issues: [.unavailablePlan])
+        }
+
+        if plan.sourceOperationID != sourceRecord.id {
+            issues.insert(.sourceOperationMismatch)
+        }
+        if sourceRecord.state != .succeeded {
+            issues.insert(.operationNotSucceeded)
+        }
+        guard let post = sourceRecord.postCheckpoint else {
+            issues.insert(.missingPostCheckpoint)
+            return GitRecoveryValidation(issues: issues)
+        }
+
+        if let expectedHead = plan.expectedCurrentHead, currentCheckpoint.headCommit != expectedHead {
+            issues.insert(.headChanged)
+        }
+        if let expectedIndex = plan.expectedCurrentIndexTree, currentCheckpoint.indexTree != expectedIndex {
+            issues.insert(.indexChanged)
+        }
+        if currentCheckpoint.branch != post.branch {
+            issues.insert(.branchChanged)
+        }
+        if currentCheckpoint.isDetachedHead != post.isDetachedHead {
+            issues.insert(.detachedHeadChanged)
+        }
+        if currentCheckpoint.operationMode != .normal {
+            issues.insert(.operationInProgress)
+        }
+
+        switch plan.inverseIntent {
+        case .stage, .unstage:
+            // A tree hash proves index equality but does not preserve every index-only bit
+            // (for example intent-to-add/sparse-index details). Until the actual index is
+            // durably checkpointed, an automatic exact restore would over-promise safety.
+            issues.insert(.unsupportedExactIndexRestore)
+        case .switchBranch, .revert:
+            if let currentStatus, !currentStatus.isClean {
+                issues.insert(.workingTreeNotClean)
+            }
+            if plan.target?.isEmpty != false {
+                issues.insert(.missingRecoveryTarget)
+            }
+        case .worktreeRemove:
+            if plan.target?.isEmpty != false {
+                issues.insert(.missingRecoveryTarget)
+            }
+        case .none:
+            issues.insert(.unavailablePlan)
+        default:
+            issues.insert(.unavailablePlan)
+        }
+
+        return GitRecoveryValidation(issues: issues)
+    }
+
+    public static func validatedAction(
+        plan: GitRecoveryPlan,
+        sourceRecord: GitOperationRecord,
+        currentCheckpoint: GitRepositoryCheckpoint,
+        currentStatus: GitStatusSnapshot? = nil
+    ) throws -> GitRecoveryAction {
+        let validation = validate(
+            plan: plan,
+            sourceRecord: sourceRecord,
+            currentCheckpoint: currentCheckpoint,
+            currentStatus: currentStatus
+        )
+        guard validation.isValid else {
+            throw GitRecoveryValidationError.rejected(validation.issues)
+        }
+        guard let target = plan.target else {
+            throw GitRecoveryValidationError.rejected([.missingRecoveryTarget])
+        }
+
+        switch plan.inverseIntent {
+        case .switchBranch:
+            return .switchBranch(target)
+        case .revert:
+            return .revertCommit(target)
+        case .worktreeRemove:
+            return .removeWorktree(target)
+        default:
+            throw GitRecoveryValidationError.rejected([.unavailablePlan])
+        }
+    }
+}
+
+public enum GitMutationAdmissionState: String, Codable, Hashable, Sendable {
+    case allowed
+    case confirmationRequired
+    case blocked
+}
+
+public struct GitMutationAdmission: Codable, Hashable, Sendable {
+    public let report: GitPreflightReport
+    public let state: GitMutationAdmissionState
+
+    public init(report: GitPreflightReport, confirmationProvided: Bool = false) {
+        self.report = report
+        if !report.canProceed {
+            state = .blocked
+        } else if report.requiresConfirmation && !confirmationProvided {
+            state = .confirmationRequired
+        } else {
+            state = .allowed
+        }
+    }
+
+    public var mayExecute: Bool { state == .allowed }
+}
