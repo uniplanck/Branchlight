@@ -37,6 +37,7 @@ final class AppModel: ObservableObject {
     private let cache = HostStatusCache()
     private let finderRequestCache = HostFinderRequestCache()
     private let gitService: any GitService
+    private let repositoryResolver: XPCRepositoryResolver
     private let historyMutationService: any GitHistoryMutationService
     private var repositoryWatcher: RepositoryWatcher?
 
@@ -46,6 +47,7 @@ final class AppModel: ObservableObject {
         let registry = GitRepositoryRegistry()
         let base = InProcessGitService(engine: engine, coordinator: coordinator, registry: registry)
         self.gitService = base
+        self.repositoryResolver = XPCRepositoryResolver(fallback: base)
         self.historyMutationService = CoordinatedGitHistoryMutationService(
             engine: engine,
             coordinator: coordinator,
@@ -59,6 +61,7 @@ final class AppModel: ObservableObject {
         historyMutationService: any GitHistoryMutationService
     ) {
         self.gitService = gitService
+        self.repositoryResolver = XPCRepositoryResolver(fallback: gitService)
         self.historyMutationService = historyMutationService
         Task { await restoreCachedState() }
     }
@@ -123,7 +126,7 @@ final class AppModel: ObservableObject {
         errorMessage = nil
         Task {
             do {
-                let root = try await gitService.repositoryRoot(for: selected)
+                let root = try await repositoryResolver.repositoryRoot(for: selected)
                 openRepository(path: root.path)
             } catch {
                 errorMessage = error.localizedDescription
@@ -166,7 +169,7 @@ final class AppModel: ObservableObject {
         let requestedURL = URL(fileURLWithPath: requestedPath)
 
         do {
-            let root = try await gitService.repositoryRoot(for: requestedURL)
+            let root = try await repositoryResolver.repositoryRoot(for: requestedURL)
             repositoryURL = root
             finderIntegrationWarning = FinderIntegrationCompatibility.warning(for: root)
             errorMessage = nil
