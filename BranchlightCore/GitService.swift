@@ -627,10 +627,15 @@ public struct InProcessGitService: GitService, Sendable {
             throw GitEngineError.invalidInput("The repository identity changed after the source operation; recovery was refused.")
         }
 
+        let requiresExactIndex = inverseIntent == .stage || inverseIntent == .unstage
         let engine = engine
         let checkpointProvider: @Sendable () async -> GitRepositoryCheckpoint? = {
             await Task.detached(priority: .utility) {
-                try? Self.captureCheckpoint(executableURL: engine.executableURL, identity: identity)
+                try? Self.captureCheckpoint(
+                    executableURL: engine.executableURL,
+                    identity: identity,
+                    captureExactIndex: requiresExactIndex
+                )
             }.value
         }
         let recoveryDescriptor = GitOperationDescriptor(
@@ -650,7 +655,8 @@ public struct InProcessGitService: GitService, Sendable {
             try await Task.detached(priority: .userInitiated) {
                 let currentCheckpoint = try Self.captureCheckpoint(
                     executableURL: engine.executableURL,
-                    identity: identity
+                    identity: identity,
+                    captureExactIndex: requiresExactIndex
                 )
                 let currentStatus = try engine.status(at: identity.repositoryURL)
                 let action = try GitRecoveryValidator.validatedAction(
@@ -661,6 +667,9 @@ public struct InProcessGitService: GitService, Sendable {
                 )
 
                 switch action {
+                case .restoreIndex(let snapshot):
+                    try Self.restoreIndex(snapshot, identity: identity)
+
                 case .switchBranch(let branch):
                     try engine.switchBranch(at: identity.repositoryURL, name: branch)
 
@@ -710,7 +719,12 @@ public struct InProcessGitService: GitService, Sendable {
     ) async throws -> T {
         let identity = try await repositoryIdentity(at: repositoryURL)
         let engine = engine
-        let checkpointProvider = Self.checkpointProvider(engine: engine, identity: identity)
+        let captureExactIndex = descriptor.intent == .stage || descriptor.intent == .unstage
+        let checkpointProvider = Self.checkpointProvider(
+            engine: engine,
+            identity: identity,
+            captureExactIndex: captureExactIndex
+        )
         return try await coordinator.run(
             repository: identity,
             label: label,
@@ -786,11 +800,16 @@ public struct InProcessGitService: GitService, Sendable {
 
     private static func checkpointProvider(
         engine: SystemGitEngine,
-        identity: GitRepositoryIdentity
+        identity: GitRepositoryIdentity,
+        captureExactIndex: Bool = false
     ) -> @Sendable () async -> GitRepositoryCheckpoint? {
         {
             await Task.detached(priority: .utility) {
-                try? Self.captureCheckpoint(executableURL: engine.executableURL, identity: identity)
+                try? Self.captureCheckpoint(
+                    executableURL: engine.executableURL,
+                    identity: identity,
+                    captureExactIndex: captureExactIndex
+                )
             }.value
         }
     }
@@ -911,7 +930,8 @@ public struct InProcessGitService: GitService, Sendable {
 
     private static func captureCheckpoint(
         executableURL: URL,
-        identity: GitRepositoryIdentity
+        identity: GitRepositoryIdentity,
+        captureExactIndex: Bool = false
     ) throws -> GitRepositoryCheckpoint {
         let root = identity.workingTreeRoot
         let branchResult = try runGitAllowingFailure(
@@ -936,14 +956,87 @@ public struct InProcessGitService: GitService, Sendable {
         let indexTree = indexResult.status == 0
             ? nonEmpty(indexResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
             : nil
+        let indexSnapshot = captureExactIndex
+            ? try captureIndexSnapshot(identity: identity)
+            : nil
 
         return GitRepositoryCheckpoint(
             headCommit: head,
             branch: branch,
             isDetachedHead: branchResult.status != 0,
             indexTree: indexTree,
+            indexSnapshot: indexSnapshot,
             operationMode: detectOperationMode(identity: identity)
         )
+    }
+
+    private static func captureIndexSnapshot(identity: GitRepositoryIdentity) throws -> GitIndexSnapshot {
+        let indexURL = URL(fileURLWithPath: identity.gitDirectory, isDirectory: true)
+            .appendingPathComponent("index", isDirectory: false)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: indexURL.path, isDirectory: &isDirectory) else {
+            return GitIndexSnapshot(data: nil, fileMode: nil)
+        }
+        guard !isDirectory.boolValue else {
+            throw GitEngineError.invalidOutput("Git index path unexpectedly points to a directory.")
+        }
+
+        let data = try Data(contentsOf: indexURL, options: [.mappedIfSafe])
+        let attributes = try FileManager.default.attributesOfItem(atPath: indexURL.path)
+        let fileMode = (attributes[.posixPermissions] as? NSNumber)?.intValue
+        return GitIndexSnapshot(data: data, fileMode: fileMode)
+    }
+
+    private static func restoreIndex(
+        _ snapshot: GitIndexSnapshot,
+        identity: GitRepositoryIdentity
+    ) throws {
+        let gitDirectory = URL(fileURLWithPath: identity.gitDirectory, isDirectory: true)
+        let indexURL = gitDirectory.appendingPathComponent("index", isDirectory: false)
+        let lockURL = gitDirectory.appendingPathComponent("index.lock", isDirectory: false)
+        let fileManager = FileManager.default
+
+        guard !fileManager.fileExists(atPath: lockURL.path) else {
+            throw GitEngineError.invalidInput("Git index is locked by another operation; exact recovery was refused.")
+        }
+
+        let lockData = snapshot.data ?? Data()
+        do {
+            try lockData.write(to: lockURL, options: [.withoutOverwriting])
+            if let fileMode = snapshot.fileMode {
+                try fileManager.setAttributes([.posixPermissions: fileMode], ofItemAtPath: lockURL.path)
+            }
+
+            if snapshot.data == nil {
+                if fileManager.fileExists(atPath: indexURL.path) {
+                    try fileManager.removeItem(at: indexURL)
+                }
+                try fileManager.removeItem(at: lockURL)
+            } else if fileManager.fileExists(atPath: indexURL.path) {
+                _ = try fileManager.replaceItemAt(
+                    indexURL,
+                    withItemAt: lockURL,
+                    backupItemName: nil,
+                    options: []
+                )
+            } else {
+                try fileManager.moveItem(at: lockURL, to: indexURL)
+            }
+
+            if snapshot.data != nil, let fileMode = snapshot.fileMode {
+                try fileManager.setAttributes([.posixPermissions: fileMode], ofItemAtPath: indexURL.path)
+            }
+        } catch {
+            if fileManager.fileExists(atPath: lockURL.path) {
+                try? fileManager.removeItem(at: lockURL)
+            }
+            throw error
+        }
+
+        let restored = try captureIndexSnapshot(identity: identity)
+        guard restored == snapshot else {
+            throw GitEngineError.invalidOutput("Exact Git index recovery verification failed after replacement.")
+        }
     }
 
     private static func runGitAllowingFailure(
