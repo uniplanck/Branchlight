@@ -21,6 +21,56 @@ jobs:
       - name: Xcode version
         run: xcodebuild -version
 
+      - name: Verify Xcode project source coverage
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import sys
+
+          roots = [
+              Path("BranchlightCore"),
+              Path("BranchlightHost"),
+              Path("BranchlightFinderExtension"),
+              Path("BranchlightCoreTests"),
+          ]
+          project = Path("Branchlight.xcodeproj/project.pbxproj").read_text()
+          sources = sorted(
+              path
+              for root in roots
+              for path in root.rglob("*.swift")
+              if path.is_file()
+          )
+
+          by_name = {}
+          for source in sources:
+              by_name.setdefault(source.name, []).append(source)
+
+          duplicates = {
+              name: paths
+              for name, paths in by_name.items()
+              if len(paths) > 1
+          }
+          if duplicates:
+              print("Duplicate Swift basenames make explicit project coverage ambiguous:")
+              for name, paths in sorted(duplicates.items()):
+                  print(f"  {name}: " + ", ".join(map(str, paths)))
+              sys.exit(1)
+
+          missing = [
+              source
+              for source in sources
+              if f"path = {source.name};" not in project
+          ]
+          if missing:
+              print("Swift sources missing from Branchlight.xcodeproj:")
+              for source in missing:
+                  print(f"  {source}")
+              print("Update the checked-in Xcode project before merging.")
+              sys.exit(1)
+
+          print(f"Verified {len(sources)} Swift source files are represented in Branchlight.xcodeproj")
+          PY
+
       - name: Test Branchlight
         run: |
           xcodebuild \
