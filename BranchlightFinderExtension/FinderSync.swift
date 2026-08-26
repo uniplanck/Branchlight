@@ -57,13 +57,37 @@ final class FinderSync: FIFinderSync {
             let aggregate = GitStatusClassifier.aggregate(
                 urls.map { envelope.statusKind(forAbsolutePath: $0.standardizedFileURL.path) }
             )
-            let statusItem = NSMenuItem(
-                title: "Status: \(aggregate.rawValue.capitalized)",
-                action: nil,
-                keyEquivalent: ""
-            )
-            statusItem.isEnabled = false
-            menu.addItem(statusItem)
+            let context = selectionPlan(for: urls, envelope: envelope)
+
+            addDisabledItem(title: "Status: \(aggregate.rawValue.capitalized)", to: menu)
+
+            if let context,
+               let intelligence = envelope.intelligence(forRepositoryRoot: context.repositoryRoot) {
+                var branchTitle = intelligence.isDetachedHead
+                    ? "HEAD: \(intelligence.branch)"
+                    : "Branch: \(intelligence.branch)"
+                if let tracking = intelligence.tracking {
+                    branchTitle += "  \(tracking.summary)"
+                }
+                addDisabledItem(title: branchTitle, to: menu)
+
+                if intelligence.operationMode != .normal {
+                    var operationTitle = "Operation: \(displayName(for: intelligence.operationMode))"
+                    if intelligence.conflictCount > 0 {
+                        operationTitle += "  •  \(intelligence.conflictCount) conflict\(intelligence.conflictCount == 1 ? "" : "s")"
+                    }
+                    addDisabledItem(title: operationTitle, to: menu)
+                }
+
+                let counts = [
+                    "Changed \(intelligence.changedCount)",
+                    "Staged \(intelligence.stagedCount)",
+                    "Untracked \(intelligence.untrackedCount)",
+                    "Conflicts \(intelligence.conflictCount)"
+                ].joined(separator: "  •  ")
+                addDisabledItem(title: counts, to: menu)
+            }
+
             menu.addItem(.separator())
 
             let changesItem = NSMenuItem(
@@ -74,7 +98,7 @@ final class FinderSync: FIFinderSync {
             changesItem.target = self
             menu.addItem(changesItem)
 
-            if let context = selectionPlan(for: urls, envelope: envelope) {
+            if let context {
                 if context.canStage {
                     let stageItem = NSMenuItem(
                         title: "Stage Selected",
@@ -172,6 +196,23 @@ final class FinderSync: FIFinderSync {
             absolutePaths: urls.map { $0.standardizedFileURL.path },
             envelope: envelope
         )
+    }
+
+    private func addDisabledItem(title: String, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
+    }
+
+    private func displayName(for mode: GitRepositoryOperationMode) -> String {
+        switch mode {
+        case .normal: return "Normal"
+        case .merging: return "Merge in progress"
+        case .rebasing: return "Rebase in progress"
+        case .cherryPicking: return "Cherry-pick in progress"
+        case .reverting: return "Revert in progress"
+        case .bisecting: return "Bisect in progress"
+        }
     }
 
     private func enqueueFinderIntent(_ action: FinderIntentAction) {
