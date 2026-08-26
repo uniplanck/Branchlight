@@ -34,6 +34,30 @@ struct BranchlightApp: App {
                 }
         }
         .windowResizability(.contentMinSize)
+        .commands {
+            BranchlightCommands()
+        }
+
+        Window("GitHub Live", id: "github-live") {
+            GitHubLiveView()
+                .environmentObject(model)
+                .environmentObject(githubModel)
+                .frame(minWidth: 760, minHeight: 560)
+        }
+        .defaultSize(width: 900, height: 680)
+    }
+}
+
+struct BranchlightCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandMenu("Branchlight") {
+            Button("GitHub Live") {
+                openWindow(id: "github-live")
+            }
+            .keyboardShortcut("g", modifiers: [.command, .shift])
+        }
     }
 }
 
@@ -203,5 +227,243 @@ final class GitHubPanelModel: ObservableObject {
         checkRuns = []
         reviews = []
         reviewedPullRequestNumber = nil
+    }
+}
+
+struct GitHubLiveView: View {
+    @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var github: GitHubPanelModel
+    @State private var selectedPullRequestNumber: Int?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+
+            if let authorization = github.deviceAuthorization {
+                deviceAuthorizationCard(authorization)
+            }
+
+            if let error = github.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+
+            if let summary = github.repositorySummary {
+                repositoryCard(summary)
+            }
+
+            HSplitView {
+                pullRequestsPane
+                    .frame(minWidth: 320)
+                detailPane
+                    .frame(minWidth: 360)
+            }
+        }
+        .padding(18)
+        .task {
+            await refresh()
+        }
+        .onChange(of: model.repositoryURL) { _ in
+            Task { await refresh() }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("GitHub Live")
+                    .font(.title2.weight(.semibold))
+                Text(github.remoteRepository?.fullName ?? "Remote repository intelligence")
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            if github.isConnected {
+                Label("Connected", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.secondary)
+                Button("Disconnect") {
+                    Task { await github.disconnect() }
+                }
+            } else {
+                Button("Connect GitHub…") {
+                    Task { await github.beginAuthentication() }
+                }
+            }
+
+            Button {
+                Task { await refresh() }
+            } label: {
+                if github.isLoading {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+            }
+            .disabled(github.isLoading || model.repositoryURL == nil)
+        }
+    }
+
+    private func deviceAuthorizationCard(_ authorization: GitHubDeviceAuthorization) -> some View {
+        GroupBox("GitHub Device Authorization") {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Enter this code on GitHub")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(authorization.userCode)
+                        .font(.system(.title3, design: .monospaced).weight(.semibold))
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                Link("Open GitHub", destination: authorization.verificationURL)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func repositoryCard(_ summary: RemoteRepositorySummary) -> some View {
+        GroupBox {
+            HStack(spacing: 18) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(summary.fullName)
+                        .font(.headline)
+                    Text("Default branch: \(summary.defaultBranch)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(summary.isPrivate ? "Private" : "Public")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let url = URL(string: summary.webURL) {
+                    Link("Open Repository", destination: url)
+                }
+            }
+        }
+    }
+
+    private var pullRequestsPane: some View {
+        GroupBox("Open Pull Requests (\(github.pullRequests.count))") {
+            if github.pullRequests.isEmpty {
+                Text("No open pull requests")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(github.pullRequests) { pullRequest in
+                    Button {
+                        selectedPullRequestNumber = pullRequest.number
+                        Task { await github.loadReviews(for: pullRequest.number) }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text("#\(pullRequest.number)")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                Text(pullRequest.title)
+                                    .lineLimit(1)
+                                if pullRequest.isDraft {
+                                    Text("Draft")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Text("\(pullRequest.headBranch) → \(pullRequest.baseBranch) · \(pullRequest.author)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var detailPane: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            GroupBox("Checks for current branch") {
+                if github.checkRuns.isEmpty {
+                    Text("No check runs found")
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 7) {
+                        ForEach(github.checkRuns) { check in
+                            HStack {
+                                Image(systemName: checkSymbol(check))
+                                Text(check.name)
+                                Spacer()
+                                Text(check.conclusion ?? check.status)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+
+            GroupBox(selectedPullRequestNumber.map { "Reviews for #\($0)" } ?? "Reviews") {
+                if let selectedPullRequestNumber,
+                   let pullRequest = github.pullRequests.first(where: { $0.number == selectedPullRequestNumber }) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(pullRequest.title)
+                            .font(.headline)
+                        if let url = URL(string: pullRequest.webURL) {
+                            Link("Open Pull Request", destination: url)
+                        }
+                        Divider()
+                        if github.reviewedPullRequestNumber != selectedPullRequestNumber {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else if github.reviews.isEmpty {
+                            Text("No submitted reviews")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(github.reviews) { review in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(review.author) · \(review.state)")
+                                        .font(.callout.weight(.medium))
+                                    if let body = review.body, !body.isEmpty {
+                                        Text(body)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(3)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Text("Select a pull request to inspect reviews.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+        }
+    }
+
+    private func refresh() async {
+        await github.refresh(
+            repositoryURL: model.repositoryURL,
+            ref: model.snapshot?.branch
+        )
+        if let selectedPullRequestNumber,
+           github.pullRequests.contains(where: { $0.number == selectedPullRequestNumber }) {
+            await github.loadReviews(for: selectedPullRequestNumber)
+        } else {
+            selectedPullRequestNumber = nil
+        }
+    }
+
+    private func checkSymbol(_ check: RemoteCheckRun) -> String {
+        switch check.conclusion?.lowercased() {
+        case "success": return "checkmark.circle.fill"
+        case "failure", "cancelled", "timed_out": return "xmark.circle.fill"
+        case nil: return "clock"
+        default: return "circle"
+        }
     }
 }
