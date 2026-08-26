@@ -133,6 +133,38 @@ final class GitConflictWorkspaceTests: XCTestCase {
         )
     }
 
+    func testServiceResolutionStagesThroughCoordinatorJournal() async throws {
+        let fixture = try makeConflictedFixture(prefix: "BranchlightConflictRuntime")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let service = InProcessGitService()
+        let conflict = try await service.conflictFile(at: fixture.repository, path: "tracked.txt")
+        XCTAssertEqual(conflict.base, "base\n")
+        XCTAssertEqual(conflict.ours, "ours\n")
+        XCTAssertEqual(conflict.theirs, "theirs\n")
+
+        let snapshot = try await service.resolveConflict(
+            at: fixture.repository,
+            path: "tracked.txt",
+            result: "runtime resolved\n"
+        )
+        XCTAssertFalse(snapshot.paths.contains(where: { $0.path == "tracked.txt" && $0.kind == .conflicted }))
+
+        let journal = await service.recentOperations(limit: 2)
+        let stageRecord = try XCTUnwrap(journal.first(where: { $0.descriptor?.intent == .stage }))
+        XCTAssertEqual(stageRecord.state, .succeeded)
+        XCTAssertEqual(stageRecord.descriptor?.affectedPaths, ["tracked.txt"])
+        XCTAssertEqual(stageRecord.preCheckpoint?.operationMode, .merging)
+        XCTAssertEqual(stageRecord.postCheckpoint?.operationMode, .merging)
+
+        _ = try await service.continueMerge(at: fixture.repository)
+        XCTAssertTrue(try engine.status(at: fixture.repository).isClean)
+        XCTAssertEqual(
+            try String(contentsOf: fixture.repository.appendingPathComponent("tracked.txt"), encoding: .utf8),
+            "runtime resolved\n"
+        )
+    }
+
     func testRejectsPathThatIsNotCurrentlyConflicted() throws {
         let fixture = try makeFixture(prefix: "BranchlightConflictReject")
         defer { try? FileManager.default.removeItem(at: fixture.root) }
