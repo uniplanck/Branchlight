@@ -13,7 +13,10 @@ private final class XPCReplyBox: @unchecked Sendable {
     }
 }
 
-private final class BranchlightGitXPCService: NSObject, BranchlightGitXPCProtocol {
+/// Foundation invokes exported XPC methods from its own connection queues. The service
+/// owns only immutable references to Branchlight's Sendable runtime primitives; mutable
+/// repository coordination itself is actor-backed inside `InProcessGitService`.
+private final class BranchlightGitXPCService: NSObject, BranchlightGitXPCProtocol, @unchecked Sendable {
     private let gitService: InProcessGitService
 
     override init() {
@@ -39,7 +42,7 @@ private final class BranchlightGitXPCService: NSObject, BranchlightGitXPCProtoco
         let replyBox = XPCReplyBox(reply)
         let gitService = gitService
 
-        Task {
+        Task { @Sendable in
             do {
                 let request = try GitXPCCodec.decode(
                     GitXPCRepositoryIdentityRequest.self,
@@ -66,7 +69,7 @@ private final class BranchlightGitXPCService: NSObject, BranchlightGitXPCProtoco
         let replyBox = XPCReplyBox(reply)
         let gitService = gitService
 
-        Task {
+        Task { @Sendable in
             do {
                 let request = try GitXPCCodec.decode(
                     GitXPCRepositoryIntelligenceRequest.self,
