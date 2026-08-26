@@ -389,3 +389,273 @@ public struct CoordinatedGitHistoryMutationService: GitHistoryMutationService, S
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
+
+// MARK: - Remote provider boundary
+
+public enum GitRemoteProviderKind: String, Codable, Hashable, Sendable {
+    case github
+    case unknown
+}
+
+public struct GitRemoteRepository: Codable, Hashable, Sendable {
+    public let remoteName: String
+    public let provider: GitRemoteProviderKind
+    public let host: String
+    public let owner: String
+    public let name: String
+    public let fetchURL: String
+    public let pushURL: String?
+
+    public init(
+        remoteName: String,
+        provider: GitRemoteProviderKind,
+        host: String,
+        owner: String,
+        name: String,
+        fetchURL: String,
+        pushURL: String? = nil
+    ) {
+        self.remoteName = remoteName
+        self.provider = provider
+        self.host = host
+        self.owner = owner
+        self.name = name
+        self.fetchURL = fetchURL
+        self.pushURL = pushURL
+    }
+
+    public var fullName: String { "\(owner)/\(name)" }
+    public var webURL: URL? { URL(string: "https://\(host)/\(fullName)") }
+}
+
+public enum GitRemoteURLParser {
+    public static func parse(
+        _ rawURL: String,
+        remoteName: String = "origin",
+        pushURL: String? = nil
+    ) throws -> GitRemoteRepository {
+        let trimmed = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw GitEngineError.invalidInput("Remote URL cannot be empty.")
+        }
+
+        let endpoint = try splitEndpoint(trimmed)
+        var components = endpoint.path
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+
+        guard components.count >= 2 else {
+            throw GitEngineError.invalidInput("Remote URL does not identify a repository.")
+        }
+
+        var repositoryName = components.removeLast()
+        if repositoryName.hasSuffix(".git") {
+            repositoryName.removeLast(4)
+        }
+        guard !repositoryName.isEmpty else {
+            throw GitEngineError.invalidInput("Remote repository name cannot be empty.")
+        }
+
+        let owner = components.joined(separator: "/")
+        guard !owner.isEmpty else {
+            throw GitEngineError.invalidInput("Remote repository owner cannot be empty.")
+        }
+
+        let normalizedHost = endpoint.host.lowercased()
+        let provider: GitRemoteProviderKind = normalizedHost == "github.com" || normalizedHost == "www.github.com"
+            ? .github
+            : .unknown
+
+        return GitRemoteRepository(
+            remoteName: remoteName,
+            provider: provider,
+            host: normalizedHost,
+            owner: owner,
+            name: repositoryName,
+            fetchURL: trimmed,
+            pushURL: pushURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private static func splitEndpoint(_ rawURL: String) throws -> (host: String, path: String) {
+        if rawURL.contains("://"),
+           let url = URL(string: rawURL),
+           let host = url.host,
+           !host.isEmpty {
+            return (host, url.path)
+        }
+
+        guard let colon = rawURL.firstIndex(of: ":") else {
+            throw GitEngineError.invalidInput("Unsupported Git remote URL format.")
+        }
+        let left = String(rawURL[..<colon])
+        guard !left.contains("/"),
+              let host = left.split(separator: "@").last,
+              !host.isEmpty else {
+            throw GitEngineError.invalidInput("Unsupported Git remote URL format.")
+        }
+        let path = String(rawURL[rawURL.index(after: colon)...])
+        return (String(host), path)
+    }
+}
+
+public struct GitRemoteDiscovery: Sendable {
+    public let executableURL: URL
+
+    public init(executableURL: URL = URL(fileURLWithPath: "/usr/bin/git")) {
+        self.executableURL = executableURL
+    }
+
+    public func origin(at repositoryURL: URL) async throws -> GitRemoteRepository? {
+        let executableURL = executableURL
+        return try await Task.detached(priority: .utility) {
+            guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+                throw GitEngineError.executableMissing(executableURL.path)
+            }
+
+            let fetch = try runRemoteCommand(
+                executableURL: executableURL,
+                repositoryURL: repositoryURL,
+                arguments: ["remote", "get-url", "origin"]
+            )
+            guard fetch.status == 0 else { return nil }
+
+            let fetchURL = fetch.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fetchURL.isEmpty else { return nil }
+
+            let push = try runRemoteCommand(
+                executableURL: executableURL,
+                repositoryURL: repositoryURL,
+                arguments: ["remote", "get-url", "--push", "origin"]
+            )
+            let pushURL = push.status == 0
+                ? push.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                : nil
+
+            return try GitRemoteURLParser.parse(
+                fetchURL,
+                remoteName: "origin",
+                pushURL: pushURL?.isEmpty == false ? pushURL : nil
+            )
+        }.value
+    }
+
+    private static func runRemoteCommand(
+        executableURL: URL,
+        repositoryURL: URL,
+        arguments: [String]
+    ) throws -> (status: Int32, stdout: String, stderr: String) {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = executableURL
+        process.arguments = ["-C", repositoryURL.standardizedFileURL.path] + arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+        try process.run()
+        let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (
+            process.terminationStatus,
+            String(data: stdout, encoding: .utf8) ?? "",
+            String(data: stderr, encoding: .utf8) ?? ""
+        )
+    }
+}
+
+public struct RemoteRepositorySummary: Codable, Hashable, Sendable {
+    public let fullName: String
+    public let defaultBranch: String
+    public let isPrivate: Bool
+    public let webURL: String
+
+    public init(fullName: String, defaultBranch: String, isPrivate: Bool, webURL: String) {
+        self.fullName = fullName
+        self.defaultBranch = defaultBranch
+        self.isPrivate = isPrivate
+        self.webURL = webURL
+    }
+}
+
+public enum RemotePullRequestState: String, Codable, Hashable, Sendable {
+    case open
+    case closed
+}
+
+public struct RemotePullRequest: Codable, Hashable, Identifiable, Sendable {
+    public let number: Int
+    public let title: String
+    public let author: String
+    public let headBranch: String
+    public let baseBranch: String
+    public let isDraft: Bool
+    public let state: RemotePullRequestState
+    public let webURL: String
+
+    public var id: Int { number }
+
+    public init(
+        number: Int,
+        title: String,
+        author: String,
+        headBranch: String,
+        baseBranch: String,
+        isDraft: Bool,
+        state: RemotePullRequestState,
+        webURL: String
+    ) {
+        self.number = number
+        self.title = title
+        self.author = author
+        self.headBranch = headBranch
+        self.baseBranch = baseBranch
+        self.isDraft = isDraft
+        self.state = state
+        self.webURL = webURL
+    }
+}
+
+public struct RemoteCheckRun: Codable, Hashable, Identifiable, Sendable {
+    public let id: Int64
+    public let name: String
+    public let status: String
+    public let conclusion: String?
+    public let detailsURL: String?
+
+    public init(id: Int64, name: String, status: String, conclusion: String?, detailsURL: String?) {
+        self.id = id
+        self.name = name
+        self.status = status
+        self.conclusion = conclusion
+        self.detailsURL = detailsURL
+    }
+}
+
+public struct RemoteReview: Codable, Hashable, Identifiable, Sendable {
+    public let id: Int64
+    public let author: String
+    public let state: String
+    public let submittedAt: Date?
+    public let body: String?
+
+    public init(id: Int64, author: String, state: String, submittedAt: Date?, body: String?) {
+        self.id = id
+        self.author = author
+        self.state = state
+        self.submittedAt = submittedAt
+        self.body = body
+    }
+}
+
+public protocol RemoteProvider: Sendable {
+    var kind: GitRemoteProviderKind { get }
+    func repositorySummary(for repository: GitRemoteRepository) async throws -> RemoteRepositorySummary
+    func pullRequests(
+        for repository: GitRemoteRepository,
+        state: RemotePullRequestState
+    ) async throws -> [RemotePullRequest]
+    func checkRuns(for repository: GitRemoteRepository, ref: String) async throws -> [RemoteCheckRun]
+    func reviews(for repository: GitRemoteRepository, pullRequestNumber: Int) async throws -> [RemoteReview]
+}
