@@ -357,3 +357,61 @@ public enum GitPatchBuilder {
         count == 1 ? "\(start)" : "\(start),\(count)"
     }
 }
+
+public extension GitService {
+    func conflictFile(
+        at repositoryURL: URL,
+        path: String,
+        maximumBytes: Int = 2 * 1024 * 1024
+    ) async throws -> GitConflictFile {
+        let root = try await repositoryRoot(for: repositoryURL)
+        return try await Task.detached(priority: .userInitiated) {
+            try SystemGitEngine().conflictFile(at: root, path: path, maximumBytes: maximumBytes)
+        }.value
+    }
+
+    @discardableResult
+    func resolveConflict(
+        at repositoryURL: URL,
+        path: String,
+        result: String,
+        maximumBytes: Int = 2 * 1024 * 1024
+    ) async throws -> GitStatusSnapshot {
+        let root = try await repositoryRoot(for: repositoryURL).standardizedFileURL
+        let data = Data(result.utf8)
+        let boundedMaximum = max(1, maximumBytes)
+        guard data.count <= boundedMaximum else {
+            throw GitConflictWorkspaceError.fileTooLarge(path)
+        }
+        guard !data.contains(0) else {
+            throw GitConflictWorkspaceError.unsupportedBinary(path)
+        }
+
+        let resultURL = root.appendingPathComponent(path, isDirectory: false).standardizedFileURL
+        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        guard !path.isEmpty,
+              path != ".",
+              !path.hasPrefix("/"),
+              !path.contains("\0"),
+              resultURL.path.hasPrefix(rootPath) else {
+            throw GitConflictWorkspaceError.invalidPath(path)
+        }
+
+        _ = try await conflictFile(at: root, path: path, maximumBytes: maximumBytes)
+        let permissions = (try? FileManager.default.attributesOfItem(atPath: resultURL.path)[.posixPermissions])
+        try data.write(to: resultURL, options: [.atomic])
+        if let permissions {
+            try? FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: resultURL.path)
+        }
+
+        // Editing the working-tree document is a host-side document mutation. The Git index
+        // mutation still goes through the existing service stage path, so coordinator,
+        // checkpoints and operation journaling remain authoritative for Git state.
+        try await stage(at: root, paths: [path])
+        let load = try await loadRepository(at: root, includeMetadata: false, historyLimit: 1)
+        guard !load.snapshot.paths.contains(where: { $0.path == path && $0.kind == .conflicted }) else {
+            throw GitEngineError.invalidOutput("Git still reports \(path) as conflicted after staging the resolution.")
+        }
+        return load.snapshot
+    }
+}
