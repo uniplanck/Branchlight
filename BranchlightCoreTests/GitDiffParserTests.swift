@@ -1,4 +1,5 @@
 import BranchlightCore
+import Foundation
 import XCTest
 
 final class GitDiffParserTests: XCTestCase {
@@ -87,5 +88,99 @@ final class GitDiffParserTests: XCTestCase {
         XCTAssertThrowsError(
             try GitPatchBuilder.patch(for: file, hunk: hunk, selectedChangedLineOrdinals: [])
         )
+    }
+}
+
+final class GitConflictWorkspaceTests: XCTestCase {
+    private let engine = SystemGitEngine()
+
+    func testLoadsBaseOursTheirsAndWorkingResultFromActiveConflict() throws {
+        let fixture = try makeFixture(prefix: "BranchlightConflictWorkspace")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        try runGit(["checkout", "-b", "side"], at: fixture.repository)
+        try "theirs\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "side change"], at: fixture.repository)
+
+        try runGit(["checkout", "main"], at: fixture.repository)
+        try "ours\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "main change"], at: fixture.repository)
+
+        XCTAssertNotEqual(try runGitAllowingFailure(["merge", "side"], at: fixture.repository), 0)
+
+        let conflict = try engine.conflictFile(at: fixture.repository, path: "tracked.txt")
+        XCTAssertEqual(conflict.path, "tracked.txt")
+        XCTAssertEqual(conflict.base, "base\n")
+        XCTAssertEqual(conflict.ours, "ours\n")
+        XCTAssertEqual(conflict.theirs, "theirs\n")
+        XCTAssertTrue(conflict.result?.contains("<<<<<<<") == true)
+        XCTAssertTrue(conflict.result?.contains("ours") == true)
+        XCTAssertTrue(conflict.result?.contains("theirs") == true)
+    }
+
+    func testRejectsPathThatIsNotCurrentlyConflicted() throws {
+        let fixture = try makeFixture(prefix: "BranchlightConflictReject")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertThrowsError(try engine.conflictFile(at: fixture.repository, path: "tracked.txt")) { error in
+            guard case GitConflictWorkspaceError.notConflicted("tracked.txt") = error else {
+                return XCTFail("Expected notConflicted, got \(error)")
+            }
+        }
+    }
+
+    private func makeFixture(prefix: String) throws -> (root: URL, repository: URL) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
+        let repository = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try runGit(["init", "-b", "main"], at: repository)
+        try runGit(["config", "user.email", "branchlight-conflict@example.invalid"], at: repository)
+        try runGit(["config", "user.name", "Branchlight Conflict Tests"], at: repository)
+        try "base\n".write(
+            to: repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: repository)
+        try runGit(["commit", "-m", "initial"], at: repository)
+        return (root, repository)
+    }
+
+    private func runGit(_ arguments: [String], at directory: URL) throws {
+        let status = try runGitAllowingFailure(arguments, at: directory)
+        guard status == 0 else {
+            throw NSError(
+                domain: "GitConflictWorkspaceTests.Git",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed"]
+            )
+        }
+    }
+
+    private func runGitAllowingFailure(_ arguments: [String], at directory: URL) throws -> Int32 {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", directory.path] + arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+        try process.run()
+        _ = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return process.terminationStatus
     }
 }
