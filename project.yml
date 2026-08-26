@@ -106,12 +106,29 @@ targets:
     dependencies:
       - target: BranchlightCore
 
+  BranchlightXPCIntegrationTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: BranchlightXPCIntegrationTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight.XPCIntegrationTests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Branchlight.app/Contents/MacOS/Branchlight
+        BUNDLE_LOADER: $(TEST_HOST)
+    dependencies:
+      - target: Branchlight
+      - target: BranchlightCore
+
 schemes:
   Branchlight:
     build:
       targets:
         Branchlight: all
         BranchlightCoreTests: [test]
+        BranchlightXPCIntegrationTests: [test]
     test:
       targets:
         - BranchlightCoreTests
+        - BranchlightXPCIntegrationTests
