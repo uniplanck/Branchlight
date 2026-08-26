@@ -108,10 +108,7 @@ final class GitRuntimeFoundationTests: XCTestCase {
         let firstEntered = RuntimeSignal()
         let releaseFirst = RuntimeSignal()
         let cancelledBodyEntered = RuntimeSignal()
-        let cancelledDescriptor = GitOperationDescriptor(
-            intent: .switchBranch,
-            target: "never-run"
-        )
+        let cancelledDescriptor = GitOperationDescriptor(intent: .switchBranch, target: "never-run")
 
         let first = Task {
             try await coordinator.run(repository: identity, label: "blocking") {
@@ -153,9 +150,11 @@ final class GitRuntimeFoundationTests: XCTestCase {
         let cancelledRecord = records.first(where: { $0.label == "cancelled" })
         XCTAssertEqual(cancelledRecord?.state, .cancelled)
         XCTAssertEqual(cancelledRecord?.descriptor, cancelledDescriptor)
+        XCTAssertNil(cancelledRecord?.preCheckpoint)
+        XCTAssertNil(cancelledRecord?.postCheckpoint)
     }
 
-    func testServiceJournalRecordsStructuredStageAndBranchTargets() async throws {
+    func testServiceJournalRecordsStructuredMetadataAndRealCheckpoints() async throws {
         let tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("BranchlightJournalTests-\(UUID().uuidString)", isDirectory: true)
         let repository = tempDirectory.appendingPathComponent("repo", isDirectory: true)
@@ -177,13 +176,31 @@ final class GitRuntimeFoundationTests: XCTestCase {
         let branchRecord = records[0]
         XCTAssertEqual(branchRecord.descriptor?.intent, .switchBranch)
         XCTAssertEqual(branchRecord.descriptor?.target, "feature/journal")
-        XCTAssertTrue(branchRecord.descriptor?.affectedPaths.isEmpty == true)
+        XCTAssertEqual(branchRecord.preCheckpoint?.branch, "main")
+        XCTAssertEqual(branchRecord.postCheckpoint?.branch, "feature/journal")
+        XCTAssertEqual(branchRecord.preCheckpoint?.headCommit, branchRecord.postCheckpoint?.headCommit)
+        XCTAssertEqual(branchRecord.preCheckpoint?.indexTree, branchRecord.postCheckpoint?.indexTree)
+
+        let branchRecovery = GitRecoveryPlanner.plan(for: branchRecord)
+        XCTAssertEqual(branchRecovery.availability, .validationRequired)
+        XCTAssertEqual(branchRecovery.inverseIntent, .switchBranch)
+        XCTAssertEqual(branchRecovery.target, "main")
 
         let stageRecord = records[1]
         XCTAssertEqual(stageRecord.descriptor?.intent, .stage)
         XCTAssertEqual(stageRecord.descriptor?.affectedPaths, ["tracked.txt"])
-        XCTAssertNil(stageRecord.descriptor?.reference)
-        XCTAssertNil(stageRecord.descriptor?.target)
+        XCTAssertEqual(stageRecord.preCheckpoint?.branch, "main")
+        XCTAssertEqual(stageRecord.postCheckpoint?.branch, "main")
+        XCTAssertEqual(stageRecord.preCheckpoint?.headCommit, stageRecord.postCheckpoint?.headCommit)
+        XCTAssertNotNil(stageRecord.preCheckpoint?.indexTree)
+        XCTAssertNotNil(stageRecord.postCheckpoint?.indexTree)
+        XCTAssertNotEqual(stageRecord.preCheckpoint?.indexTree, stageRecord.postCheckpoint?.indexTree)
+
+        let stageRecovery = GitRecoveryPlanner.plan(for: stageRecord)
+        XCTAssertEqual(stageRecovery.availability, .validationRequired)
+        XCTAssertEqual(stageRecovery.inverseIntent, .unstage)
+        XCTAssertEqual(stageRecovery.affectedPaths, ["tracked.txt"])
+        XCTAssertEqual(stageRecovery.expectedCurrentIndexTree, stageRecord.postCheckpoint?.indexTree)
     }
 
     func testLinkedWorktreesShareCoordinationKeyAndRegisterSeparately() async throws {
