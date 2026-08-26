@@ -23,8 +23,9 @@ final class GitExactIndexRecoveryTests: XCTestCase {
         let exactPreIndex = try indexData(in: fixture.repository)
 
         try await service.stage(at: fixture.repository, paths: ["tracked.txt"])
+        let stageRecords = await service.recentOperations(limit: 4)
         let sourceRecord = try XCTUnwrap(
-            await service.recentOperations(limit: 4).first(where: {
+            stageRecords.first(where: {
                 $0.descriptor?.intent == .stage && $0.descriptor?.affectedPaths == ["tracked.txt"]
             })
         )
@@ -70,8 +71,9 @@ final class GitExactIndexRecoveryTests: XCTestCase {
         let exactPreIndex = try indexData(in: fixture.repository)
 
         try await service.unstage(at: fixture.repository, paths: ["tracked.txt"])
+        let unstageRecords = await service.recentOperations(limit: 4)
         let sourceRecord = try XCTUnwrap(
-            await service.recentOperations(limit: 4).first(where: {
+            unstageRecords.first(where: {
                 $0.descriptor?.intent == .unstage && $0.descriptor?.affectedPaths == ["tracked.txt"]
             })
         )
@@ -105,8 +107,9 @@ final class GitExactIndexRecoveryTests: XCTestCase {
             encoding: .utf8
         )
         try await service.stage(at: fixture.repository, paths: ["tracked.txt"])
+        let stageRecords = await service.recentOperations(limit: 2)
         let sourceRecord = try XCTUnwrap(
-            await service.recentOperations(limit: 2).first(where: {
+            stageRecords.first(where: {
                 $0.descriptor?.intent == .stage && $0.descriptor?.affectedPaths == ["tracked.txt"]
             })
         )
@@ -137,8 +140,9 @@ final class GitExactIndexRecoveryTests: XCTestCase {
         )
 
         try await service.stage(at: fixture.repository, paths: ["tracked.txt"])
+        let stageRecords = await service.recentOperations(limit: 2)
         let sourceRecord = try XCTUnwrap(
-            await service.recentOperations(limit: 2).first(where: {
+            stageRecords.first(where: {
                 $0.descriptor?.intent == .stage && $0.descriptor?.affectedPaths == ["tracked.txt"]
             })
         )
