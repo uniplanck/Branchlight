@@ -39,16 +39,32 @@ public actor GitOperationCoordinator {
         operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         let key = repository.coordinationKey
+        let operationID = UUID()
+        let requestedAt = Date()
         await acquire(key)
 
-        let operationID = UUID()
-        let startedAt = Date()
+        if Task.isCancelled {
+            appendCompleted(
+                GitOperationRecord(
+                    id: operationID,
+                    repository: repository,
+                    label: label,
+                    state: .cancelled,
+                    startedAt: requestedAt,
+                    finishedAt: Date(),
+                    errorDescription: CancellationError().localizedDescription
+                )
+            )
+            release(key)
+            throw CancellationError()
+        }
+
         activeRecords[operationID] = GitOperationRecord(
             id: operationID,
             repository: repository,
             label: label,
             state: .running,
-            startedAt: startedAt,
+            startedAt: requestedAt,
             finishedAt: nil,
             errorDescription: nil
         )
@@ -58,6 +74,14 @@ public actor GitOperationCoordinator {
             finish(operationID: operationID, state: .succeeded, errorDescription: nil)
             release(key)
             return value
+        } catch is CancellationError {
+            finish(
+                operationID: operationID,
+                state: .cancelled,
+                errorDescription: CancellationError().localizedDescription
+            )
+            release(key)
+            throw CancellationError()
         } catch {
             finish(operationID: operationID, state: .failed, errorDescription: error.localizedDescription)
             release(key)
@@ -104,7 +128,7 @@ public actor GitOperationCoordinator {
 
     private func finish(operationID: UUID, state: GitOperationState, errorDescription: String?) {
         guard let running = activeRecords.removeValue(forKey: operationID) else { return }
-        completedRecords.append(
+        appendCompleted(
             GitOperationRecord(
                 id: running.id,
                 repository: running.repository,
@@ -115,6 +139,10 @@ public actor GitOperationCoordinator {
                 errorDescription: errorDescription
             )
         )
+    }
+
+    private func appendCompleted(_ record: GitOperationRecord) {
+        completedRecords.append(record)
         if completedRecords.count > maxCompletedRecords {
             completedRecords.removeFirst(completedRecords.count - maxCompletedRecords)
         }
@@ -215,11 +243,17 @@ public struct InProcessGitService: GitService, Sendable {
             let branches = try engine.branches(at: identity.repositoryURL)
             let upstream = branches.first(where: { $0.isCurrent })?.upstream
             let operationMode = Self.detectOperationMode(identity: identity)
+            let tracking = try Self.detectAheadBehind(
+                executableURL: engine.executableURL,
+                identity: identity,
+                upstream: upstream
+            )
 
             return GitRepositoryIntelligence(
                 identity: identity,
                 branch: snapshot.branch,
                 upstream: upstream,
+                tracking: tracking,
                 isDetachedHead: snapshot.isDetachedHead,
                 operationMode: operationMode,
                 changedCount: snapshot.paths.count,
@@ -460,5 +494,43 @@ public struct InProcessGitService: GitService, Sendable {
         if exists("REVERT_HEAD") { return .reverting }
         if exists("BISECT_START") { return .bisecting }
         return .normal
+    }
+
+    private static func detectAheadBehind(
+        executableURL: URL,
+        identity: GitRepositoryIdentity,
+        upstream: String?
+    ) throws -> GitAheadBehind? {
+        guard let upstream, !upstream.isEmpty else { return nil }
+
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = executableURL
+        process.arguments = [
+            "-C", identity.workingTreeRoot,
+            "rev-list", "--left-right", "--count", "HEAD...\(upstream)"
+        ]
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+
+        try process.run()
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            return nil
+        }
+
+        let output = String(data: stdoutData, encoding: .utf8) ?? ""
+        let fields = output.split(whereSeparator: { $0 == "\t" || $0 == " " || $0 == "\n" })
+        guard fields.count >= 2,
+              let ahead = Int(fields[0]),
+              let behind = Int(fields[1]) else {
+            throw GitEngineError.invalidOutput("Could not parse upstream ahead/behind counts.")
+        }
+        return GitAheadBehind(ahead: ahead, behind: behind)
     }
 }
