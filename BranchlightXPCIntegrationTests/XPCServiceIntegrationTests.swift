@@ -1,3 +1,4 @@
+@testable import Branchlight
 import BranchlightCore
 import Foundation
 import XCTest
@@ -59,7 +60,7 @@ final class XPCServiceIntegrationTests: XCTestCase {
         XCTAssertNil(initial.upstream)
 
         // Mutate only the isolated temporary repository. This proves the XPC process owns
-        // a working mutation coordinator without switching the production Host yet.
+        // a working mutation coordinator without touching any user repository.
         let relativePath = "Sources/Feature/change.txt"
         let stageResponse = try await performMutation(
             proxy,
@@ -84,6 +85,39 @@ final class XPCServiceIntegrationTests: XCTestCase {
         XCTAssertEqual(unstaged.changedCount, 1)
         XCTAssertEqual(unstaged.stagedCount, 0)
         XCTAssertEqual(unstaged.untrackedCount, 1)
+    }
+
+    func testHostMutationAdapterExecutesThroughBundledXPC() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Branchlight-XPC-Host-Adapter-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        try runGit(["init", "-b", "main"], at: fixture)
+        try runGit(["config", "user.name", "Branchlight XPC Test"], at: fixture)
+        try runGit(["config", "user.email", "branchlight-xpc@example.invalid"], at: fixture)
+
+        let tracked = fixture.appendingPathComponent("tracked.txt")
+        try Data("host-adapter\n".utf8).write(to: tracked, options: [.atomic])
+
+        let reads = BranchlightCore.InProcessGitService()
+        let service = XPCMutationGitService(reads: reads)
+
+        try await service.stage(at: fixture, paths: ["tracked.txt"])
+        let staged = try await reads.loadRepository(at: fixture, includeMetadata: false, historyLimit: 1)
+        XCTAssertEqual(staged.snapshot.paths.count, 1)
+        XCTAssertTrue(staged.snapshot.paths[0].isStaged)
+
+        let commitResult = try await service.commit(
+            at: fixture,
+            message: "test: host mutation adapter",
+            amend: false
+        )
+        XCTAssertFalse(commitResult.stdout.isEmpty)
+
+        let reconciled = try await reads.loadRepository(at: fixture, includeMetadata: true, historyLimit: 5)
+        XCTAssertTrue(reconciled.snapshot.isClean)
+        XCTAssertEqual(reconciled.history?.first?.subject, "test: host mutation adapter")
     }
 
     private func makeProxy(connection: NSXPCConnection) throws -> BranchlightGitXPCProtocol {
