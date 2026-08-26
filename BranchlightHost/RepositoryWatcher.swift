@@ -85,6 +85,7 @@ final class RepositoryWatcher: @unchecked Sendable {
 
 enum GitAILocalCommandError: LocalizedError, Sendable {
     case notConfigured
+    case missingContext
     case invalidExecutable(String)
     case invalidArguments
     case timedOut
@@ -97,6 +98,8 @@ enum GitAILocalCommandError: LocalizedError, Sendable {
         switch self {
         case .notConfigured:
             return "No local AI command provider is configured."
+        case .missingContext:
+            return "Refresh repository context before running the local AI provider."
         case .invalidExecutable(let path):
             return "The configured AI executable is not an absolute executable file: \(path)"
         case .invalidArguments:
@@ -245,5 +248,31 @@ struct GitAILocalCommandProvider: GitAIProvider, Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !response.isEmpty else { throw GitAILocalCommandError.emptyOutput }
         return response
+    }
+}
+
+@MainActor
+extension GitAIWorkbenchModel {
+    var hasConfiguredLocalProvider: Bool {
+        (try? GitAILocalCommandConfiguration.fromEnvironment()) != nil
+    }
+
+    var configuredLocalProviderName: String? {
+        guard let configuration = try? GitAILocalCommandConfiguration.fromEnvironment() else { return nil }
+        return GitAILocalCommandProvider(configuration: configuration).providerName
+    }
+
+    func performConfiguredLocalProvider() async throws -> GitAIResponse {
+        guard let context else { throw GitAILocalCommandError.missingContext }
+        let configuration = try GitAILocalCommandConfiguration.fromEnvironment()
+        let provider = GitAILocalCommandProvider(configuration: configuration)
+        let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try await provider.perform(
+            GitAIRequest(
+                intent: intent,
+                context: context,
+                instruction: trimmed.isEmpty ? nil : trimmed
+            )
+        )
     }
 }
