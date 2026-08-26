@@ -15,13 +15,20 @@ fi
 
 HOST_PLIST="$ROOT/BranchlightHost/Info.plist"
 EXTENSION_PLIST="$ROOT/BranchlightFinderExtension/Info.plist"
+XPC_PLIST="$ROOT/BranchlightXPC/Info.plist"
 HOST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$HOST_PLIST")"
 HOST_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$HOST_PLIST")"
 EXT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$EXTENSION_PLIST")"
 EXT_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$EXTENSION_PLIST")"
+XPC_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$XPC_PLIST")"
+XPC_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$XPC_PLIST")"
 
 if [[ "$HOST_VERSION" != "$EXT_VERSION" || "$HOST_BUILD" != "$EXT_BUILD" ]]; then
   echo "Host/Finder Extension version mismatch: host=$HOST_VERSION($HOST_BUILD) extension=$EXT_VERSION($EXT_BUILD)" >&2
+  exit 65
+fi
+if [[ "$HOST_VERSION" != "$XPC_VERSION" || "$HOST_BUILD" != "$XPC_BUILD" ]]; then
+  echo "Host/Git XPC version mismatch: host=$HOST_VERSION($HOST_BUILD) xpc=$XPC_VERSION($XPC_BUILD)" >&2
   exit 65
 fi
 
@@ -38,27 +45,37 @@ APP_PATH=""
 verify_bundle() {
   local app="$1"
   local extension="$app/Contents/PlugIns/BranchlightFinderExtension.appex"
+  local xpc="$app/Contents/XPCServices/BranchlightGitService.xpc"
   local framework="$app/Contents/Frameworks/BranchlightCore.framework"
 
   test -d "$app"
   test -x "$app/Contents/MacOS/Branchlight"
   test -d "$extension"
   test -x "$extension/Contents/MacOS/BranchlightFinderExtension"
+  test -d "$xpc"
+  test -x "$xpc/Contents/MacOS/BranchlightGitService"
   test -d "$framework"
   test -f "$framework/BranchlightCore"
 
   local host_version host_build extension_version extension_build extension_point
+  local xpc_version xpc_build xpc_service_type
   host_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
   host_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")"
   extension_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$extension/Contents/Info.plist")"
   extension_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$extension/Contents/Info.plist")"
   extension_point="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$extension/Contents/Info.plist")"
+  xpc_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$xpc/Contents/Info.plist")"
+  xpc_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$xpc/Contents/Info.plist")"
+  xpc_service_type="$(/usr/libexec/PlistBuddy -c 'Print :XPCService:ServiceType' "$xpc/Contents/Info.plist")"
 
   test "$host_version" = "$HOST_VERSION"
   test "$host_build" = "$HOST_BUILD"
   test "$extension_version" = "$HOST_VERSION"
   test "$extension_build" = "$HOST_BUILD"
   test "$extension_point" = "com.apple.FinderSync"
+  test "$xpc_version" = "$HOST_VERSION"
+  test "$xpc_build" = "$HOST_BUILD"
+  test "$xpc_service_type" = "Application"
 }
 
 if [[ "$MODE" == "--unsigned" ]]; then
@@ -75,7 +92,7 @@ if [[ "$MODE" == "--unsigned" ]]; then
 
   APP_PATH="$DERIVED_DATA/Build/Products/Release/Branchlight.app"
   verify_bundle "$APP_PATH"
-  echo "Unsigned Release readiness PASS: Branchlight $HOST_VERSION ($HOST_BUILD)"
+  echo "Unsigned Release readiness PASS: Branchlight $HOST_VERSION ($HOST_BUILD) + Finder Sync + Git XPC"
   exit 0
 fi
 
@@ -102,6 +119,7 @@ verify_bundle "$APP_PATH"
 
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 codesign --verify --deep --strict --verbose=2 "$APP_PATH/Contents/PlugIns/BranchlightFinderExtension.appex"
+codesign --verify --deep --strict --verbose=2 "$APP_PATH/Contents/XPCServices/BranchlightGitService.xpc"
 
 if ! codesign -d --verbose=4 "$APP_PATH" 2>&1 | grep -q 'runtime'; then
   echo "Signed host app is missing Hardened Runtime." >&2
@@ -110,6 +128,10 @@ fi
 if ! codesign -d --verbose=4 "$APP_PATH/Contents/PlugIns/BranchlightFinderExtension.appex" 2>&1 | grep -q 'runtime'; then
   echo "Signed Finder Extension is missing Hardened Runtime." >&2
   exit 67
+fi
+if ! codesign -d --verbose=4 "$APP_PATH/Contents/XPCServices/BranchlightGitService.xpc" 2>&1 | grep -q 'runtime'; then
+  echo "Signed Git XPC service is missing Hardened Runtime." >&2
+  exit 68
 fi
 
 mkdir -p "$OUTPUT_DIR"

@@ -12,7 +12,7 @@ jobs:
   test:
     name: Build & Test
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     steps:
       - name: Checkout
@@ -20,6 +20,22 @@ jobs:
 
       - name: Xcode version
         run: xcodebuild -version
+
+      - name: Generate Xcode project from source of truth
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+          xcodegen generate
+
+      - name: Upload generated Xcode project
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-xcodeproj
+          path: Branchlight.xcodeproj/project.pbxproj
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Verify Xcode project source coverage
         run: |
@@ -31,6 +47,7 @@ jobs:
               Path("BranchlightCore"),
               Path("BranchlightHost"),
               Path("BranchlightFinderExtension"),
+              Path("BranchlightXPC"),
               Path("BranchlightCoreTests"),
           ]
           project = Path("Branchlight.xcodeproj/project.pbxproj").read_text()
@@ -62,10 +79,9 @@ jobs:
               if f"path = {source.name};" not in project
           ]
           if missing:
-              print("Swift sources missing from Branchlight.xcodeproj:")
+              print("Swift sources missing from generated Branchlight.xcodeproj:")
               for source in missing:
                   print(f"  {source}")
-              print("Update the checked-in Xcode project before merging.")
               sys.exit(1)
 
           print(f"Verified {len(sources)} Swift source files are represented in Branchlight.xcodeproj")
@@ -85,6 +101,7 @@ jobs:
               "SecItem": "Finder must not access Keychain credentials",
               "api.github.com": "Finder must not call GitHub APIs",
               "github.com/login": "Finder must not own OAuth flows",
+              "NSXPCConnection": "Finder must not synchronously depend on the Git XPC service",
           }
           core_forbidden = {
               "import Security": "Core must not own Keychain credentials",
@@ -112,7 +129,7 @@ jobs:
                   print(f"  {violation}")
               sys.exit(1)
 
-          print("Finder subprocess/network/credential boundary and Core Keychain boundary verified")
+          print("Finder subprocess/network/credential/XPC boundary and Core Keychain boundary verified")
           PY
 
       - name: Verify release configuration source of truth
@@ -125,19 +142,23 @@ jobs:
           required = [
               "CODE_SIGN_ENTITLEMENTS: BranchlightHost/BranchlightHost.entitlements",
               "CODE_SIGN_ENTITLEMENTS: BranchlightFinderExtension/BranchlightFinderExtension.entitlements",
+              "type: xpc-service",
+              "PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight.GitService",
+              "ServiceType: Application",
           ]
           for needle in required:
               if needle not in project:
                   print(f"Missing release configuration invariant: {needle}")
                   sys.exit(1)
 
-          if project.count("ENABLE_HARDENED_RUNTIME: YES") < 2:
-              print("Host and Finder Extension must both enable Hardened Runtime in project.yml")
+          if project.count("ENABLE_HARDENED_RUNTIME: YES") < 3:
+              print("Host, Finder Extension and Git XPC service must enable Hardened Runtime in project.yml")
               sys.exit(1)
 
           release_script = Path("scripts/build-release.sh").read_text()
           for needle in [
               "ENABLE_HARDENED_RUNTIME=YES",
+              "Contents/XPCServices/BranchlightGitService.xpc",
               "codesign --verify --deep --strict",
               "xcrun notarytool submit",
               "xcrun stapler staple",
@@ -147,7 +168,7 @@ jobs:
                   print(f"Release script lost required safety step: {needle}")
                   sys.exit(1)
 
-          print("Release SoT and signed/notarized pipeline invariants verified")
+          print("Release SoT, bundled XPC and signed/notarized pipeline invariants verified")
           PY
 
       - name: Test Branchlight
