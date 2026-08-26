@@ -188,6 +188,88 @@ final class BundledGitXPCClient: @unchecked Sendable {
         }
     }
 
+    func recoveryCandidates(
+        at repositoryURL: URL,
+        limit: Int = 50
+    ) async throws -> [GitXPCRecoveryCandidate] {
+        let request = GitXPCRecoveryCandidatesRequest(
+            repositoryPath: repositoryURL.standardizedFileURL.path,
+            limit: limit
+        )
+        let requestData = try GitXPCCodec.encode(request)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let gate = XPCReplyGate<[GitXPCRecoveryCandidate]>(continuation)
+            scheduleTimeout(gate, operation: "recoveryCandidates", seconds: readTimeoutSeconds)
+            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
+                gate.fail(error)
+            }) as? BranchlightGitXPCProtocol else {
+                gate.fail(GitXPCContractError.unavailableProxy)
+                return
+            }
+
+            proxy.recoveryCandidates(requestData) { data, error in
+                do {
+                    if let error { throw error }
+                    guard let data else { throw GitXPCContractError.missingReplyPayload }
+                    let response = try GitXPCCodec.decode(
+                        GitXPCRecoveryCandidatesResponse.self,
+                        from: data
+                    )
+                    try GitXPCCodec.validateProtocolVersion(response.protocolVersion)
+                    guard response.requestID == request.requestID else {
+                        throw GitXPCContractError.requestIDMismatch
+                    }
+                    gate.succeed(response.candidates)
+                } catch {
+                    gate.fail(error)
+                }
+            }
+        }
+    }
+
+    /// Recovery changes Git state and follows the same no-replay rule as ordinary
+    /// mutations. A lost reply requires state reconciliation before another attempt.
+    func executeRecovery(
+        at repositoryURL: URL,
+        operationID: UUID
+    ) async throws -> GitXPCRecoveryOutcome {
+        let request = GitXPCRecoveryExecuteRequest(
+            repositoryPath: repositoryURL.standardizedFileURL.path,
+            operationID: operationID
+        )
+        let requestData = try GitXPCCodec.encode(request)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let gate = XPCReplyGate<GitXPCRecoveryOutcome>(continuation)
+            scheduleTimeout(gate, operation: "executeRecovery", seconds: mutationTimeoutSeconds)
+            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
+                gate.fail(error)
+            }) as? BranchlightGitXPCProtocol else {
+                gate.fail(GitXPCContractError.unavailableProxy)
+                return
+            }
+
+            proxy.executeRecovery(requestData) { data, error in
+                do {
+                    if let error { throw error }
+                    guard let data else { throw GitXPCContractError.missingReplyPayload }
+                    let response = try GitXPCCodec.decode(
+                        GitXPCRecoveryExecuteResponse.self,
+                        from: data
+                    )
+                    try GitXPCCodec.validateProtocolVersion(response.protocolVersion)
+                    guard response.requestID == request.requestID else {
+                        throw GitXPCContractError.requestIDMismatch
+                    }
+                    gate.succeed(response.outcome)
+                } catch {
+                    gate.fail(error)
+                }
+            }
+        }
+    }
+
     private func scheduleTimeout<Value: Sendable>(
         _ gate: XPCReplyGate<Value>,
         operation: String,
