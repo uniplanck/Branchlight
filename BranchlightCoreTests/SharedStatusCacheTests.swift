@@ -112,6 +112,61 @@ final class SharedStatusCacheTests: XCTestCase {
         XCTAssertNil(cache.consumePendingFinderIntent())
     }
 
+    func testCorruptEnvelopeIsQuarantinedAndCacheRecovers() throws {
+        let (cache, directory) = try makeCache()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let envelopeURL = directory.appendingPathComponent("status-cache-envelope-v1.json")
+        try Data("{not-valid-json".utf8).write(to: envelopeURL, options: .atomic)
+
+        let recovered = cache.load()
+        XCTAssertEqual(recovered.revision, 0)
+        XCTAssertTrue(recovered.snapshots.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: envelopeURL.path))
+
+        let quarantined = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .filter { $0.hasPrefix("status-cache-envelope-v1.json.corrupt-") }
+        XCTAssertEqual(quarantined.count, 1)
+
+        let snapshot = GitStatusSnapshot(
+            repositoryRoot: "/tmp/recovered",
+            branch: "main",
+            isDetachedHead: false,
+            paths: []
+        )
+        _ = try cache.replaceSnapshot(snapshot)
+        XCTAssertEqual(cache.load().snapshots["/tmp/recovered"]?.branch, "main")
+    }
+
+    func testCorruptPendingIntentIsQuarantinedAndIgnored() throws {
+        let (cache, directory) = try makeCache()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let intentURL = directory.appendingPathComponent("pending-finder-intent-v1.json")
+        try Data([0xFF, 0x00, 0x13]).write(to: intentURL, options: .atomic)
+
+        XCTAssertNil(cache.consumePendingFinderIntent())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: intentURL.path))
+        let quarantined = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .filter { $0.hasPrefix("pending-finder-intent-v1.json.corrupt-") }
+        XCTAssertEqual(quarantined.count, 1)
+    }
+
+    func testCorruptBackupsAreBounded() throws {
+        let (cache, directory) = try makeCache()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let envelopeURL = directory.appendingPathComponent("status-cache-envelope-v1.json")
+        for index in 0..<6 {
+            try Data("bad-json-\(index)".utf8).write(to: envelopeURL, options: .atomic)
+            _ = cache.load()
+        }
+
+        let quarantined = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .filter { $0.hasPrefix("status-cache-envelope-v1.json.corrupt-") }
+        XCTAssertEqual(quarantined.count, 3)
+    }
+
     func testMigratesLegacyEnvelopeWithoutUserDefaultsAccess() throws {
         let (cacheDirectory, legacyPreferencesURL) = try makeMigrationFixture()
         defer { try? FileManager.default.removeItem(at: cacheDirectory.deletingLastPathComponent()) }
