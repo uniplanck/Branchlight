@@ -13,7 +13,7 @@ Branchlight is not a replacement Finder, code editor, terminal emulator, or Git 
 - Deep workflows live in the native Branchlight Host UI.
 - Git semantics continue to come from the system Git implementation.
 
-## Current transitional component model
+## Current component model
 
 ```text
 Finder
@@ -27,23 +27,29 @@ App Group atomic JSON boundary
   |
 BranchlightHost
   |
-  +--> GitService
-  |     +--> InProcessGitService             <- authoritative mutation path today
-  |           +--> GitOperationCoordinator
-  |           +--> GitRepositoryRegistry
-  |           +--> SystemGitEngine
-  |                 +--> /usr/bin/git
+  +--> Host GitService adapter
+  |     +--> read-only operations
+  |     |     +--> BranchlightCore.InProcessGitService
+  |     |           +--> SystemGitEngine
+  |     |                 +--> /usr/bin/git
+  |     |
+  |     +--> every Git mutation
+  |           +--> BundledGitXPCClient
+  |                 +--> BranchlightGitService.xpc
+  |                       +--> one GitOperationCoordinator
+  |                       +--> one GitRepositoryRegistry
+  |                       +--> InProcessGitService
+  |                       +--> CoordinatedGitHistoryMutationService
+  |                             +--> /usr/bin/git
   |
-  +--> BundledGitXPCClient
-  |     +--> BranchlightGitService.xpc       <- physical boundary exists
-  |           +--> versioned/bounded RPC
-  |           +--> read-only identity RPC
-  |           +--> InProcessGitService
+  +--> XPCRepositoryResolver
+  |     +--> XPC identity/intelligence first
+  |     +--> read-only in-process fallback only
   |
   +--> RepositoryWatcher (FSEvents)
 ```
 
-The XPC process is now a real bundled product, not merely an architecture sketch. The migration is deliberately incremental: read-only/probe traffic can establish transport correctness before any mutation changes ownership.
+The bundled XPC process is now the authoritative Git mutation owner. The Host keeps an in-process implementation only for read-only operations while that surface is migrated independently.
 
 ## Hard invariants
 
@@ -69,24 +75,26 @@ Writes remain atomic. Corrupt payloads are quarantined instead of being retried 
 
 Branchlight must not maintain a pretend index or parallel source-control model that can drift from Git.
 
-Structured diff, line staging, history, blame, branch state, worktrees, stashes, merge/rebase state, recovery logic, and future XPC execution ultimately reconcile with `/usr/bin/git` and repository filesystem state.
+Structured diff, line staging, history, blame, branch state, worktrees, stashes, merge/rebase state, recovery logic, and XPC execution ultimately reconcile with `/usr/bin/git` and repository filesystem state.
 
 ### 5. Mutations require exactly one authoritative owner
 
-All state-changing Git operations must converge on one coordinator that provides:
+All state-changing Git operations converge on the bundled `BranchlightGitService.xpc` process and its shared repository coordinator.
+
+The owner provides:
 
 - repository-scoped serialization
 - operation identity
 - cancellation
 - timeout policy
 - preflight validation
-- post-operation refresh
+- post-operation reconciliation
 - journaling
 - recovery metadata
 
-The current authoritative mutation owner is the Host process through `InProcessGitService` and its shared coordinator. During XPC migration, do **not** move isolated mutations independently while leaving another mutation coordinator active for the same repository.
+The Host no longer executes Git mutations through its read-only in-process service. Stage, unstage, patch application, commit, fetch, pull, push, branch switching, merge/rebase controls, stash changes, worktree changes, cherry-pick, and revert all cross the XPC boundary.
 
-Most importantly, an interrupted XPC mutation must never be silently replayed through an in-process fallback. The remote process may have already changed Git state before the connection error became visible. Recovery is reconciliation-first, never blind retry.
+An interrupted XPC mutation is never silently replayed through an in-process fallback. The remote process may have already changed Git state before the connection error became visible. Recovery is reconciliation-first, never blind retry.
 
 ### 6. Repository identity is not just a folder path
 
@@ -106,7 +114,7 @@ A linked worktree and the primary checkout may share Git storage while having in
 
 Git state must not be owned solely by a SwiftUI view model.
 
-The Host UI projects repository state for presentation, but canonical runtime contracts must be usable by Finder integration, native UI, background refresh, hosted-provider integration, AI context generation, and future automation without duplicating Git state machines.
+The Host UI projects repository state for presentation, but canonical runtime contracts are usable by Finder integration, native UI, background refresh, hosted-provider integration, AI context generation, and future automation without duplicating Git state machines.
 
 ### 8. XPC transport is bounded and versioned
 
@@ -121,6 +129,8 @@ Current rules include:
 - fail-closed version mismatch
 - Host-only connection ownership
 - no credential transport
+- exhaustive typed mutation enum rather than arbitrary command execution
+- no mutation replay fallback
 
 Adding an RPC requires typed request/response coverage and must not expose arbitrary command execution.
 
@@ -140,7 +150,7 @@ Adding an RPC requires typed request/response coverage and must not expose arbit
 - watcher ownership
 - error and operation presentation
 
-Git mutation safety and serialization no longer live solely in those UI methods, but further extraction remains useful where it reduces presentation/runtime coupling rather than merely creating more types.
+Those methods now request mutations from the XPC-owned runtime rather than owning mutation serialization themselves. Further extraction remains useful only where it materially reduces presentation/runtime coupling.
 
 GitHub Live and AI Workbench already use independent Host models instead of returning those responsibilities to `AppModel`.
 
@@ -160,17 +170,16 @@ Branchlight Host UI
 BranchlightGitService.xpc
       |
       +--> RepositoryRegistry
-      +--> RepositoryStateEngine
       +--> GitOperationCoordinator
-      +--> OperationJournal
-      +--> StatusCache publication
+      +--> OperationJournal / checkpoints
+      +--> safety admission
       +--> GitBackend
                |
                v
            /usr/bin/git
 ```
 
-The physical XPC process, contract, client, target generation, embedding, and Release-bundle verification now exist. The remaining runtime migration is to move the complete authoritative Git operation surface behind that boundary without creating split mutation ownership.
+The mutation side of this target is implemented. Read-only Host operations remain independently migratable because they cannot create split mutation ownership.
 
 ## Runtime extraction / migration order
 
@@ -180,9 +189,10 @@ The physical XPC process, contract, client, target generation, embedding, and Re
 4. Separate hosted-provider / AI presentation state from `AppModel`. **Implemented for those surfaces.**
 5. Versioned/atomic Finder shared boundary. **Implemented and hardened.**
 6. Physical bundled XPC target + versioned contract + Host client. **Implemented.**
-7. Read-only XPC probe/repository-identity vertical slice. **Implemented, signed runtime acceptance pending.**
-8. Move the complete mutation/history surface to one XPC-owned coordinator.
-9. Remove obsolete in-process mutation ownership only after parity and failure-path acceptance.
+7. Read-only XPC probe/repository-identity/intelligence vertical slice. **Implemented.**
+8. Move the complete mutation/history surface to one XPC-owned coordinator. **Implemented.**
+9. Remove Host in-process mutation ownership from the execution path. **Implemented.**
+10. Signed development-Mac XPC/Finder runtime acceptance. **External acceptance gate.**
 
 ## Acceptance rules for runtime work
 
@@ -190,6 +200,8 @@ A runtime refactor is not accepted merely because it compiles. Each bounded chan
 
 - Core unit tests
 - real temporary-repository integration tests
+- app-hosted real XPC process integration tests
+- Host adapter → XPC → real Git mutation tests
 - Finder cache-only behavior
 - Finder selection intent freshness/one-shot behavior
 - no Git subprocess/network/XPC dependency from Finder
@@ -203,7 +215,7 @@ A runtime refactor is not accepted merely because it compiles. Each bounded chan
 - generated Xcode target coverage
 - optimized Release bundle structure
 
-XPC lifecycle changes additionally require a signed macOS build and real service launch/probe acceptance before final closure. Finder integration changes likewise require real signed Finder acceptance. GitHub CI cannot substitute for either of those runtime gates.
+XPC lifecycle changes additionally require a signed macOS build and real service launch/probe acceptance before external closure. Finder integration changes likewise require real signed Finder acceptance. GitHub CI cannot substitute for either runtime gate.
 
 ## Build-graph authority
 
