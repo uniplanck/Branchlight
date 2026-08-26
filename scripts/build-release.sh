@@ -13,6 +13,16 @@ if [[ "$MODE" != "--unsigned" && "$MODE" != "--signed" ]]; then
   exit 64
 fi
 
+if ! command -v xcodegen >/dev/null 2>&1; then
+  echo "XcodeGen is required so release builds are generated from project.yml. Install xcodegen before building a Branchlight release." >&2
+  exit 69
+fi
+
+(
+  cd "$ROOT"
+  xcodegen generate
+)
+
 HOST_PLIST="$ROOT/BranchlightHost/Info.plist"
 EXTENSION_PLIST="$ROOT/BranchlightFinderExtension/Info.plist"
 XPC_PLIST="$ROOT/BranchlightXPC/Info.plist"
