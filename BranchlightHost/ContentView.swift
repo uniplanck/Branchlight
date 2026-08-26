@@ -43,6 +43,14 @@ struct ContentView: View {
                     branchesView
                         .tabItem { Label("Branches", systemImage: "point.3.connected.trianglepath.dotted") }
                         .tag(3)
+                    conflictView
+                        .tabItem {
+                            Label(
+                                "Conflicts",
+                                systemImage: model.conflictedPaths.isEmpty ? "checkmark.shield" : "exclamationmark.triangle"
+                            )
+                        }
+                        .tag(4)
                 }
             } else {
                 emptyState
@@ -729,7 +737,7 @@ struct ContentView: View {
                     .font(.headline)
 
                     if intelligence.conflictCount > 0 {
-                        Text("Resolve and stage \(intelligence.conflictCount) conflict\(intelligence.conflictCount == 1 ? "" : "s") in Changes before continuing.")
+                        Text("Resolve \(intelligence.conflictCount) conflict\(intelligence.conflictCount == 1 ? "" : "s") in the Conflicts workspace before continuing.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
@@ -756,6 +764,143 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var conflictView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Three-way Conflict Workspace")
+                        .font(.headline)
+                    Text("Compare Git's index stages, edit the result, then stage the resolved file.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if !model.conflictedPaths.isEmpty {
+                    Text("\(model.conflictedPaths.count) unresolved")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if model.conflictedPaths.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "checkmark.shield")
+                        .font(.system(size: 30))
+                        .foregroundStyle(.secondary)
+                    Text("No unresolved conflicts")
+                        .font(.headline)
+                    if let intelligence = currentRepositoryIntelligence,
+                       intelligence.operationMode == .merging || intelligence.operationMode == .rebasing {
+                        Text("The repository operation is still in progress. Continue or abort it below.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        advancedOperationCard(intelligence)
+                            .frame(maxWidth: 680)
+                    } else {
+                        Text("When Git reports a text conflict, BASE / OURS / THEIRS and an editable RESULT appear here.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HSplitView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Conflicted Files")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        List(model.conflictedPaths, id: \.self) { path in
+                            Button {
+                                model.loadConflict(path: path)
+                            } label: {
+                                HStack(spacing: 7) {
+                                    Image(systemName: model.selectedConflictPath == path ? "arrow.right.circle.fill" : "exclamationmark.triangle")
+                                    Text(path)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Spacer()
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(model.isRefreshing || model.isLoadingConflict)
+                        }
+                    }
+                    .frame(minWidth: 180, idealWidth: 220, maxWidth: 280)
+
+                    Group {
+                        if model.isLoadingConflict {
+                            ProgressView("Loading conflict stages…")
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else if let conflict = model.conflictFile {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(conflict.path)
+                                    .font(.callout.weight(.semibold))
+                                    .textSelection(.enabled)
+
+                                HSplitView {
+                                    conflictSide(title: "BASE", text: conflict.base)
+                                    conflictSide(title: "OURS", text: conflict.ours)
+                                    conflictSide(title: "THEIRS", text: conflict.theirs)
+                                }
+                                .frame(minHeight: 150, idealHeight: 210)
+
+                                GroupBox("RESULT") {
+                                    TextEditor(text: $model.conflictResult)
+                                        .font(.system(.body, design: .monospaced))
+                                        .frame(minHeight: 190)
+                                }
+
+                                HStack(spacing: 8) {
+                                    Button("Use BASE") { model.useConflictBase() }
+                                        .disabled(conflict.base == nil || model.isRefreshing)
+                                    Button("Use OURS") { model.useConflictOurs() }
+                                        .disabled(conflict.ours == nil || model.isRefreshing)
+                                    Button("Use THEIRS") { model.useConflictTheirs() }
+                                        .disabled(conflict.theirs == nil || model.isRefreshing)
+                                    Button("Reset") { model.resetConflictResult() }
+                                        .disabled(model.isRefreshing)
+                                    Spacer()
+                                    Button("Resolve & Stage") { model.saveConflictResolution() }
+                                        .keyboardShortcut(.return, modifiers: [.command, .shift])
+                                        .disabled(model.isRefreshing || model.isLoadingConflict)
+                                }
+                            }
+                            .padding(.leading, 8)
+                        } else {
+                            VStack(spacing: 8) {
+                                Image(systemName: "arrow.left.circle")
+                                    .font(.system(size: 28))
+                                    .foregroundStyle(.secondary)
+                                Text("Choose a conflicted file")
+                                    .font(.headline)
+                                Text("Branchlight will read Git's BASE, OURS and THEIRS index stages without invoking an external merge tool.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.top, 8)
+    }
+
+    private func conflictSide(title: String, text: String?) -> some View {
+        GroupBox(title) {
+            ScrollView([.vertical, .horizontal]) {
+                Text(text ?? "Not present in this conflict stage.")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(text == nil ? .secondary : .primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(6)
+            }
+        }
+        .frame(minWidth: 180)
     }
 
     private func isCurrentWorktree(_ worktree: GitWorktree) -> Bool {
