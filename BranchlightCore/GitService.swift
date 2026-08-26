@@ -37,6 +37,7 @@ public actor GitOperationCoordinator {
         repository: GitRepositoryIdentity,
         label: String,
         descriptor: GitOperationDescriptor? = nil,
+        checkpointProvider: (@Sendable () async -> GitRepositoryCheckpoint?)? = nil,
         operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         let key = repository.coordinationKey
@@ -61,11 +62,13 @@ public actor GitOperationCoordinator {
             throw CancellationError()
         }
 
+        let preCheckpoint = await checkpointProvider?()
         activeRecords[operationID] = GitOperationRecord(
             id: operationID,
             repository: repository,
             label: label,
             descriptor: descriptor,
+            preCheckpoint: preCheckpoint,
             state: .running,
             startedAt: requestedAt,
             finishedAt: nil,
@@ -74,19 +77,33 @@ public actor GitOperationCoordinator {
 
         do {
             let value = try await operation()
-            finish(operationID: operationID, state: .succeeded, errorDescription: nil)
+            let postCheckpoint = await checkpointProvider?()
+            finish(
+                operationID: operationID,
+                state: .succeeded,
+                errorDescription: nil,
+                postCheckpoint: postCheckpoint
+            )
             release(key)
             return value
         } catch is CancellationError {
+            let postCheckpoint = await checkpointProvider?()
             finish(
                 operationID: operationID,
                 state: .cancelled,
-                errorDescription: CancellationError().localizedDescription
+                errorDescription: CancellationError().localizedDescription,
+                postCheckpoint: postCheckpoint
             )
             release(key)
             throw CancellationError()
         } catch {
-            finish(operationID: operationID, state: .failed, errorDescription: error.localizedDescription)
+            let postCheckpoint = await checkpointProvider?()
+            finish(
+                operationID: operationID,
+                state: .failed,
+                errorDescription: error.localizedDescription,
+                postCheckpoint: postCheckpoint
+            )
             release(key)
             throw error
         }
@@ -129,7 +146,12 @@ public actor GitOperationCoordinator {
         next.resume()
     }
 
-    private func finish(operationID: UUID, state: GitOperationState, errorDescription: String?) {
+    private func finish(
+        operationID: UUID,
+        state: GitOperationState,
+        errorDescription: String?,
+        postCheckpoint: GitRepositoryCheckpoint?
+    ) {
         guard let running = activeRecords.removeValue(forKey: operationID) else { return }
         appendCompleted(
             GitOperationRecord(
@@ -137,6 +159,8 @@ public actor GitOperationCoordinator {
                 repository: running.repository,
                 label: running.label,
                 descriptor: running.descriptor,
+                preCheckpoint: running.preCheckpoint,
+                postCheckpoint: postCheckpoint,
                 state: state,
                 startedAt: running.startedAt,
                 finishedAt: Date(),
@@ -516,10 +540,16 @@ public struct InProcessGitService: GitService, Sendable {
     ) async throws -> T {
         let identity = try await repositoryIdentity(at: repositoryURL)
         let engine = engine
+        let checkpointProvider: @Sendable () async -> GitRepositoryCheckpoint? = {
+            await Task.detached(priority: .utility) {
+                try? Self.captureCheckpoint(executableURL: engine.executableURL, identity: identity)
+            }.value
+        }
         return try await coordinator.run(
             repository: identity,
             label: label,
-            descriptor: descriptor
+            descriptor: descriptor,
+            checkpointProvider: checkpointProvider
         ) {
             try await Task.detached(priority: .userInitiated) {
                 try operation(engine, identity.repositoryURL)
@@ -600,34 +630,90 @@ public struct InProcessGitService: GitService, Sendable {
     ) throws -> GitAheadBehind? {
         guard let upstream, !upstream.isEmpty else { return nil }
 
-        let process = Process()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.executableURL = executableURL
-        process.arguments = [
-            "-C", identity.workingTreeRoot,
-            "rev-list", "--left-right", "--count", "HEAD...\(upstream)"
-        ]
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+        let result = try runGitAllowingFailure(
+            executableURL: executableURL,
+            arguments: [
+                "-C", identity.workingTreeRoot,
+                "rev-list", "--left-right", "--count", "HEAD...\(upstream)"
+            ]
+        )
+        guard result.status == 0 else { return nil }
 
-        try process.run()
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        _ = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            return nil
-        }
-
-        let output = String(data: stdoutData, encoding: .utf8) ?? ""
-        let fields = output.split(whereSeparator: { $0 == "\t" || $0 == " " || $0 == "\n" })
+        let fields = result.stdout.split(whereSeparator: { $0 == "\t" || $0 == " " || $0 == "\n" })
         guard fields.count >= 2,
               let ahead = Int(fields[0]),
               let behind = Int(fields[1]) else {
             throw GitEngineError.invalidOutput("Could not parse upstream ahead/behind counts.")
         }
         return GitAheadBehind(ahead: ahead, behind: behind)
+    }
+
+    private static func captureCheckpoint(
+        executableURL: URL,
+        identity: GitRepositoryIdentity
+    ) throws -> GitRepositoryCheckpoint {
+        let root = identity.workingTreeRoot
+        let branchResult = try runGitAllowingFailure(
+            executableURL: executableURL,
+            arguments: ["-C", root, "symbolic-ref", "--quiet", "--short", "HEAD"]
+        )
+        let headResult = try runGitAllowingFailure(
+            executableURL: executableURL,
+            arguments: ["-C", root, "rev-parse", "--verify", "HEAD"]
+        )
+        let indexResult = try runGitAllowingFailure(
+            executableURL: executableURL,
+            arguments: ["-C", root, "write-tree"]
+        )
+
+        let branch = branchResult.status == 0
+            ? nonEmpty(branchResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
+            : nil
+        let head = headResult.status == 0
+            ? nonEmpty(headResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
+            : nil
+        let indexTree = indexResult.status == 0
+            ? nonEmpty(indexResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
+            : nil
+
+        return GitRepositoryCheckpoint(
+            headCommit: head,
+            branch: branch,
+            isDetachedHead: branchResult.status != 0,
+            indexTree: indexTree,
+            operationMode: detectOperationMode(identity: identity)
+        )
+    }
+
+    private static func runGitAllowingFailure(
+        executableURL: URL,
+        arguments: [String]
+    ) throws -> (status: Int32, stdout: String, stderr: String) {
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            throw GitEngineError.executableMissing(executableURL.path)
+        }
+
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+
+        try process.run()
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (
+            process.terminationStatus,
+            String(data: stdoutData, encoding: .utf8) ?? "",
+            String(data: stderrData, encoding: .utf8) ?? ""
+        )
+    }
+
+    private static func nonEmpty(_ value: String) -> String? {
+        value.isEmpty ? nil : value
     }
 }
