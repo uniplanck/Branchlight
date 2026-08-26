@@ -106,6 +106,42 @@ final class BundledGitXPCClient: @unchecked Sendable {
         }
     }
 
+    func repositoryIntelligence(at repositoryURL: URL) async throws -> GitRepositoryIntelligence {
+        let request = GitXPCRepositoryIntelligenceRequest(
+            repositoryPath: repositoryURL.standardizedFileURL.path
+        )
+        let requestData = try GitXPCCodec.encode(request)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let gate = XPCReplyGate<GitRepositoryIntelligence>(continuation)
+            scheduleTimeout(gate, operation: "repositoryIntelligence")
+            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
+                gate.fail(error)
+            }) as? BranchlightGitXPCProtocol else {
+                gate.fail(GitXPCContractError.unavailableProxy)
+                return
+            }
+
+            proxy.repositoryIntelligence(requestData) { data, error in
+                do {
+                    if let error { throw error }
+                    guard let data else { throw GitXPCContractError.missingReplyPayload }
+                    let response = try GitXPCCodec.decode(
+                        GitXPCRepositoryIntelligenceResponse.self,
+                        from: data
+                    )
+                    try GitXPCCodec.validateProtocolVersion(response.protocolVersion)
+                    guard response.requestID == request.requestID else {
+                        throw GitXPCContractError.requestIDMismatch
+                    }
+                    gate.succeed(response.intelligence)
+                } catch {
+                    gate.fail(error)
+                }
+            }
+        }
+    }
+
     private func scheduleTimeout<Value: Sendable>(
         _ gate: XPCReplyGate<Value>,
         operation: String
@@ -127,9 +163,10 @@ final class BundledGitXPCClient: @unchecked Sendable {
 }
 
 /// Read-through migration adapter used by the Host while the physical XPC boundary is
-/// being adopted. Repository discovery is safe to retry in-process because it is
-/// read-only. This fallback pattern must never be copied to Git mutations: an XPC
-/// mutation can have changed repository state even when its reply is lost.
+/// being adopted. Repository discovery/intelligence reads are safe to retry in-process
+/// because they cannot mutate Git state. This fallback pattern must never be copied to
+/// Git mutations: an XPC mutation can have changed repository state even when its reply
+/// is lost.
 final class XPCRepositoryResolver: @unchecked Sendable {
     private let client: BundledGitXPCClient
     private let fallback: any GitService
@@ -159,6 +196,14 @@ final class XPCRepositoryResolver: @unchecked Sendable {
             return try await client.repositoryIdentity(at: repositoryURL)
         } catch {
             return try await fallback.repositoryIdentity(at: repositoryURL)
+        }
+    }
+
+    func repositoryIntelligence(at repositoryURL: URL) async throws -> GitRepositoryIntelligence {
+        do {
+            return try await client.repositoryIntelligence(at: repositoryURL)
+        } catch {
+            return try await fallback.repositoryIntelligence(at: repositoryURL)
         }
     }
 }
