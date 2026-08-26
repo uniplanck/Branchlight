@@ -8,17 +8,25 @@ enum HostFinderRequest: Sendable {
 
 actor HostStatusCache {
     private let cache: SharedStatusCache?
+    private let intelligenceService: any GitService
 
-    init(cache: SharedStatusCache? = SharedStatusCache()) {
+    init(
+        cache: SharedStatusCache? = SharedStatusCache(),
+        intelligenceService: any GitService = InProcessGitService()
+    ) {
         self.cache = cache
+        self.intelligenceService = intelligenceService
     }
 
     func load() -> StatusCacheEnvelope {
         cache?.load() ?? StatusCacheEnvelope()
     }
 
-    func replaceSnapshot(_ snapshot: GitStatusSnapshot) throws -> StatusCacheEnvelope? {
-        try cache?.replaceSnapshot(snapshot)
+    func replaceSnapshot(_ snapshot: GitStatusSnapshot) async throws -> StatusCacheEnvelope? {
+        guard let cache else { return nil }
+        let repositoryURL = URL(fileURLWithPath: snapshot.repositoryRoot, isDirectory: true)
+        let intelligence = try await intelligenceService.repositoryIntelligence(at: repositoryURL)
+        return try cache.replaceRepositoryState(snapshot: snapshot, intelligence: intelligence)
     }
 }
 
