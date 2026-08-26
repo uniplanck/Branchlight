@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 
 final class XPCServiceIntegrationTests: XCTestCase {
-    func testBundledServiceLaunchesAndResolvesRepositoryIdentity() async throws {
+    func testBundledServiceLaunchesAndServesRepositoryReads() async throws {
         let fixture = FileManager.default.temporaryDirectory
             .appendingPathComponent("Branchlight-XPC-Integration-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
@@ -14,6 +14,10 @@ final class XPCServiceIntegrationTests: XCTestCase {
             .appendingPathComponent("Sources", isDirectory: true)
             .appendingPathComponent("Feature", isDirectory: true)
         try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data("xpc-read\n".utf8).write(
+            to: nested.appendingPathComponent("change.txt"),
+            options: [.atomic]
+        )
 
         let connection = NSXPCConnection(serviceName: BranchlightGitXPCContract.serviceName)
         connection.remoteObjectInterface = NSXPCInterface(with: BranchlightGitXPCProtocol.self)
@@ -26,14 +30,43 @@ final class XPCServiceIntegrationTests: XCTestCase {
 
         // Resolve from a nested selection, not just the repository root. This is the
         // exact read path used by Finder open-path requests and the Host repository picker.
-        let request = GitXPCRepositoryIdentityRequest(repositoryPath: nested.standardizedFileURL.path)
-        let response = try await repositoryIdentity(proxy, request: request)
+        let identityRequest = GitXPCRepositoryIdentityRequest(
+            repositoryPath: nested.standardizedFileURL.path
+        )
+        let identityResponse = try await repositoryIdentity(proxy, request: identityRequest)
 
-        XCTAssertEqual(response.protocolVersion, BranchlightGitXPCContract.protocolVersion)
-        XCTAssertEqual(response.requestID, request.requestID)
-        XCTAssertEqual(response.identity.workingTreeRoot, fixture.standardizedFileURL.path)
-        XCTAssertEqual(response.identity.gitDirectory, fixture.appendingPathComponent(".git", isDirectory: true).standardizedFileURL.path)
-        XCTAssertEqual(response.identity.commonGitDirectory, response.identity.gitDirectory)
+        XCTAssertEqual(identityResponse.protocolVersion, BranchlightGitXPCContract.protocolVersion)
+        XCTAssertEqual(identityResponse.requestID, identityRequest.requestID)
+        XCTAssertEqual(identityResponse.identity.workingTreeRoot, fixture.standardizedFileURL.path)
+        XCTAssertEqual(
+            identityResponse.identity.gitDirectory,
+            fixture.appendingPathComponent(".git", isDirectory: true).standardizedFileURL.path
+        )
+        XCTAssertEqual(
+            identityResponse.identity.commonGitDirectory,
+            identityResponse.identity.gitDirectory
+        )
+
+        let intelligenceRequest = GitXPCRepositoryIntelligenceRequest(
+            repositoryPath: nested.standardizedFileURL.path
+        )
+        let intelligenceResponse = try await repositoryIntelligence(
+            proxy,
+            request: intelligenceRequest
+        )
+        let intelligence = intelligenceResponse.intelligence
+
+        XCTAssertEqual(intelligenceResponse.protocolVersion, BranchlightGitXPCContract.protocolVersion)
+        XCTAssertEqual(intelligenceResponse.requestID, intelligenceRequest.requestID)
+        XCTAssertEqual(intelligence.identity, identityResponse.identity)
+        XCTAssertEqual(intelligence.branch, "main")
+        XCTAssertFalse(intelligence.isDetachedHead)
+        XCTAssertEqual(intelligence.operationMode, .normal)
+        XCTAssertEqual(intelligence.changedCount, 1)
+        XCTAssertEqual(intelligence.untrackedCount, 1)
+        XCTAssertEqual(intelligence.stagedCount, 0)
+        XCTAssertEqual(intelligence.conflictCount, 0)
+        XCTAssertNil(intelligence.upstream)
     }
 
     private func makeProxy(connection: NSXPCConnection) throws -> BranchlightGitXPCProtocol {
@@ -68,6 +101,34 @@ final class XPCServiceIntegrationTests: XCTestCase {
                     if let error { throw error }
                     guard let data else { throw GitXPCContractError.missingReplyPayload }
                     let response = try GitXPCCodec.decode(GitXPCRepositoryIdentityResponse.self, from: data)
+                    try GitXPCCodec.validateProtocolVersion(response.protocolVersion)
+                    guard response.requestID == request.requestID else {
+                        throw GitXPCContractError.requestIDMismatch
+                    }
+                    gate.succeed(response)
+                } catch {
+                    gate.fail(error)
+                }
+            }
+        }
+    }
+
+    private func repositoryIntelligence(
+        _ proxy: BranchlightGitXPCProtocol,
+        request: GitXPCRepositoryIntelligenceRequest
+    ) async throws -> GitXPCRepositoryIntelligenceResponse {
+        let requestData = try GitXPCCodec.encode(request)
+        return try await withCheckedThrowingContinuation { continuation in
+            let gate = XPCContinuationGate<GitXPCRepositoryIntelligenceResponse>(continuation)
+            scheduleTimeout(gate, operation: "repositoryIntelligence")
+            proxy.repositoryIntelligence(requestData) { data, error in
+                do {
+                    if let error { throw error }
+                    guard let data else { throw GitXPCContractError.missingReplyPayload }
+                    let response = try GitXPCCodec.decode(
+                        GitXPCRepositoryIntelligenceResponse.self,
+                        from: data
+                    )
                     try GitXPCCodec.validateProtocolVersion(response.protocolVersion)
                     guard response.requestID == request.requestID else {
                         throw GitXPCContractError.requestIDMismatch
