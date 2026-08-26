@@ -220,18 +220,9 @@ final class GitSafetyPreflightTests: XCTestCase {
     }
 
     func testIrreversibleRemovalIsAlwaysDestructive() {
-        let stashDrop = GitSafetyPreflight.evaluate(
-            intent: .stashDrop,
-            intelligence: makeIntelligence()
-        )
-        let worktreeRemove = GitSafetyPreflight.evaluate(
-            intent: .worktreeRemove,
-            intelligence: makeIntelligence()
-        )
-        let resetHard = GitSafetyPreflight.evaluate(
-            intent: .resetHard,
-            intelligence: makeIntelligence()
-        )
+        let stashDrop = GitSafetyPreflight.evaluate(intent: .stashDrop, intelligence: makeIntelligence())
+        let worktreeRemove = GitSafetyPreflight.evaluate(intent: .worktreeRemove, intelligence: makeIntelligence())
+        let resetHard = GitSafetyPreflight.evaluate(intent: .resetHard, intelligence: makeIntelligence())
 
         XCTAssertEqual(stashDrop.risk, .destructive)
         XCTAssertEqual(worktreeRemove.risk, .destructive)
@@ -267,6 +258,83 @@ final class GitSafetyPreflightTests: XCTestCase {
             untrackedCount: untrackedCount,
             conflictCount: conflictCount,
             capturedAt: Date(timeIntervalSince1970: 1)
+        )
+    }
+}
+
+final class GitRecoveryPlannerTests: XCTestCase {
+    func testWholePathStageProducesValidationRequiredUnstageCandidate() {
+        let record = makeRecord(
+            descriptor: GitOperationDescriptor(intent: .stage, affectedPaths: ["A.swift", "B.swift"])
+        )
+        let plan = GitRecoveryPlanner.plan(for: record)
+
+        XCTAssertEqual(plan.availability, .validationRequired)
+        XCTAssertEqual(plan.inverseIntent, .unstage)
+        XCTAssertEqual(plan.affectedPaths, ["A.swift", "B.swift"])
+        XCTAssertTrue(plan.isRecoverableCandidate)
+    }
+
+    func testPatchStageIsUnavailableWithoutIndexCheckpoint() {
+        let record = makeRecord(
+            descriptor: GitOperationDescriptor(intent: .stage, target: "patch")
+        )
+        let plan = GitRecoveryPlanner.plan(for: record)
+
+        XCTAssertEqual(plan.availability, .unavailable)
+        XCTAssertNil(plan.inverseIntent)
+        XCTAssertFalse(plan.isRecoverableCandidate)
+    }
+
+    func testWorktreeCreationProducesValidatedRemovalCandidate() {
+        let record = makeRecord(
+            descriptor: GitOperationDescriptor(
+                intent: .worktreeAdd,
+                reference: "feature/recovery",
+                target: "/tmp/recovery-worktree"
+            )
+        )
+        let plan = GitRecoveryPlanner.plan(for: record)
+
+        XCTAssertEqual(plan.availability, .validationRequired)
+        XCTAssertEqual(plan.inverseIntent, .worktreeRemove)
+        XCTAssertEqual(plan.target, "/tmp/recovery-worktree")
+    }
+
+    func testDestructiveOrFailedOperationsNeverOfferRecoveryCandidate() {
+        let dropped = GitRecoveryPlanner.plan(
+            for: makeRecord(descriptor: GitOperationDescriptor(intent: .stashDrop, reference: "stash@{0}"))
+        )
+        let failed = GitRecoveryPlanner.plan(
+            for: makeRecord(
+                descriptor: GitOperationDescriptor(intent: .stage, affectedPaths: ["A.swift"]),
+                state: .failed
+            )
+        )
+
+        XCTAssertEqual(dropped.availability, .unavailable)
+        XCTAssertEqual(failed.availability, .unavailable)
+        XCTAssertNil(dropped.inverseIntent)
+        XCTAssertNil(failed.inverseIntent)
+    }
+
+    private func makeRecord(
+        descriptor: GitOperationDescriptor?,
+        state: GitOperationState = .succeeded
+    ) -> GitOperationRecord {
+        GitOperationRecord(
+            id: UUID(),
+            repository: GitRepositoryIdentity(
+                workingTreeRoot: "/tmp/repo",
+                gitDirectory: "/tmp/repo/.git",
+                commonGitDirectory: "/tmp/repo/.git"
+            ),
+            label: "test",
+            descriptor: descriptor,
+            state: state,
+            startedAt: Date(timeIntervalSince1970: 1),
+            finishedAt: Date(timeIntervalSince1970: 2),
+            errorDescription: state == .failed ? "failed" : nil
         )
     }
 }
