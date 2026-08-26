@@ -108,6 +108,10 @@ final class GitRuntimeFoundationTests: XCTestCase {
         let firstEntered = RuntimeSignal()
         let releaseFirst = RuntimeSignal()
         let cancelledBodyEntered = RuntimeSignal()
+        let cancelledDescriptor = GitOperationDescriptor(
+            intent: .switchBranch,
+            target: "never-run"
+        )
 
         let first = Task {
             try await coordinator.run(repository: identity, label: "blocking") {
@@ -119,7 +123,11 @@ final class GitRuntimeFoundationTests: XCTestCase {
         await firstEntered.wait()
 
         let cancelled = Task {
-            try await coordinator.run(repository: identity, label: "cancelled") {
+            try await coordinator.run(
+                repository: identity,
+                label: "cancelled",
+                descriptor: cancelledDescriptor
+            ) {
                 await cancelledBodyEntered.signal()
                 return "must-not-run"
             }
@@ -142,7 +150,40 @@ final class GitRuntimeFoundationTests: XCTestCase {
         let bodyEntered = await cancelledBodyEntered.isSignaled
         XCTAssertFalse(bodyEntered)
         let records = await coordinator.recentOperations(limit: 2)
-        XCTAssertEqual(records.first(where: { $0.label == "cancelled" })?.state, .cancelled)
+        let cancelledRecord = records.first(where: { $0.label == "cancelled" })
+        XCTAssertEqual(cancelledRecord?.state, .cancelled)
+        XCTAssertEqual(cancelledRecord?.descriptor, cancelledDescriptor)
+    }
+
+    func testServiceJournalRecordsStructuredStageAndBranchTargets() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BranchlightJournalTests-\(UUID().uuidString)", isDirectory: true)
+        let repository = tempDirectory.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        try initializeRepository(at: repository)
+        try runGit(["branch", "feature/journal"], at: repository)
+        try "changed\n".write(to: repository.appendingPathComponent("tracked.txt"), atomically: true, encoding: .utf8)
+
+        let coordinator = GitOperationCoordinator()
+        let service = InProcessGitService(coordinator: coordinator)
+        try await service.stage(at: repository, paths: ["tracked.txt"])
+        try await service.switchBranch(at: repository, name: "feature/journal")
+
+        let records = await service.recentOperations(limit: 2)
+        XCTAssertEqual(records.count, 2)
+
+        let branchRecord = records[0]
+        XCTAssertEqual(branchRecord.descriptor?.intent, .switchBranch)
+        XCTAssertEqual(branchRecord.descriptor?.target, "feature/journal")
+        XCTAssertTrue(branchRecord.descriptor?.affectedPaths.isEmpty == true)
+
+        let stageRecord = records[1]
+        XCTAssertEqual(stageRecord.descriptor?.intent, .stage)
+        XCTAssertEqual(stageRecord.descriptor?.affectedPaths, ["tracked.txt"])
+        XCTAssertNil(stageRecord.descriptor?.reference)
+        XCTAssertNil(stageRecord.descriptor?.target)
     }
 
     func testLinkedWorktreesShareCoordinationKeyAndRegisterSeparately() async throws {
