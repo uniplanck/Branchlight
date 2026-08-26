@@ -326,6 +326,56 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func mergeBranch(_ name: String) {
+        runMutation(label: "Merged \(name)") { service, repositoryURL in
+            _ = try await service.merge(
+                at: repositoryURL,
+                branch: name,
+                confirmationProvided: true
+            )
+        }
+    }
+
+    func continueMerge() {
+        runMutation(label: "Merge continued") { service, repositoryURL in
+            _ = try await service.continueMerge(at: repositoryURL)
+        }
+    }
+
+    func abortMerge() {
+        runMutation(label: "Merge aborted") { service, repositoryURL in
+            _ = try await service.abortMerge(at: repositoryURL)
+        }
+    }
+
+    func rebaseCurrentBranch(onto name: String) {
+        runMutation(label: "Rebased onto \(name)") { service, repositoryURL in
+            _ = try await service.rebase(
+                at: repositoryURL,
+                onto: name,
+                confirmationProvided: true
+            )
+        }
+    }
+
+    func continueRebase() {
+        runMutation(label: "Rebase continued") { service, repositoryURL in
+            _ = try await service.continueRebase(at: repositoryURL)
+        }
+    }
+
+    func abortRebase() {
+        runMutation(label: "Rebase aborted") { service, repositoryURL in
+            _ = try await service.abortRebase(at: repositoryURL)
+        }
+    }
+
+    func skipRebaseCommit() {
+        runMutation(label: "Rebase commit skipped") { service, repositoryURL in
+            _ = try await service.skipRebase(at: repositoryURL)
+        }
+    }
+
     func createStash() {
         let message = stashMessage
         let includeUntracked = stashIncludeUntracked
@@ -578,7 +628,12 @@ final class AppModel: ObservableObject {
                     loadDiff()
                 }
             } catch {
-                errorMessage = error.localizedDescription
+                let mutationError = error.localizedDescription
+                // A Git command can legitimately fail after changing repository state,
+                // most notably merge/rebase conflicts and stash-pop conflicts. Always
+                // reconcile the repository before presenting the failure to the user.
+                await refresh()
+                errorMessage = mutationError
                 isRefreshing = false
             }
         }
