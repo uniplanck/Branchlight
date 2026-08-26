@@ -38,6 +38,13 @@ public protocol GitEngine: Sendable {
     func push(at repositoryURL: URL) throws -> GitCommandResult
     func branches(at repositoryURL: URL) throws -> [GitBranch]
     func switchBranch(at repositoryURL: URL, name: String) throws
+    func merge(at repositoryURL: URL, branch: String) throws -> GitCommandResult
+    func continueMerge(at repositoryURL: URL) throws -> GitCommandResult
+    func abortMerge(at repositoryURL: URL) throws -> GitCommandResult
+    func rebase(at repositoryURL: URL, onto branch: String) throws -> GitCommandResult
+    func continueRebase(at repositoryURL: URL) throws -> GitCommandResult
+    func abortRebase(at repositoryURL: URL) throws -> GitCommandResult
+    func skipRebase(at repositoryURL: URL) throws -> GitCommandResult
     func history(at repositoryURL: URL, limit: Int) throws -> [GitCommit]
     func fileHistory(at repositoryURL: URL, path: String, limit: Int) throws -> [GitCommit]
     func blame(at repositoryURL: URL, path: String) throws -> [GitBlameLine]
@@ -202,6 +209,50 @@ public struct SystemGitEngine: GitEngine, Sendable {
         guard !trimmed.isEmpty else { throw GitEngineError.invalidInput("Branch name cannot be empty.") }
         let root = try repositoryRoot(for: repositoryURL)
         _ = try run(["-C", root.path, "switch", "--", trimmed])
+    }
+
+    public func merge(at repositoryURL: URL, branch: String) throws -> GitCommandResult {
+        let root = try repositoryRoot(for: repositoryURL)
+        let commit = try resolveLocalBranchCommit(branch, at: root)
+        let result = try run(["-C", root.path, "merge", "--no-edit", commit])
+        return GitCommandResult(stdout: result.stdout, stderr: result.stderr)
+    }
+
+    public func continueMerge(at repositoryURL: URL) throws -> GitCommandResult {
+        let root = try repositoryRoot(for: repositoryURL)
+        let result = try run(["-c", "core.editor=true", "-C", root.path, "merge", "--continue"])
+        return GitCommandResult(stdout: result.stdout, stderr: result.stderr)
+    }
+
+    public func abortMerge(at repositoryURL: URL) throws -> GitCommandResult {
+        let root = try repositoryRoot(for: repositoryURL)
+        let result = try run(["-C", root.path, "merge", "--abort"])
+        return GitCommandResult(stdout: result.stdout, stderr: result.stderr)
+    }
+
+    public func rebase(at repositoryURL: URL, onto branch: String) throws -> GitCommandResult {
+        let root = try repositoryRoot(for: repositoryURL)
+        let commit = try resolveLocalBranchCommit(branch, at: root)
+        let result = try run(["-C", root.path, "rebase", commit])
+        return GitCommandResult(stdout: result.stdout, stderr: result.stderr)
+    }
+
+    public func continueRebase(at repositoryURL: URL) throws -> GitCommandResult {
+        let root = try repositoryRoot(for: repositoryURL)
+        let result = try run(["-c", "core.editor=true", "-C", root.path, "rebase", "--continue"])
+        return GitCommandResult(stdout: result.stdout, stderr: result.stderr)
+    }
+
+    public func abortRebase(at repositoryURL: URL) throws -> GitCommandResult {
+        let root = try repositoryRoot(for: repositoryURL)
+        let result = try run(["-C", root.path, "rebase", "--abort"])
+        return GitCommandResult(stdout: result.stdout, stderr: result.stderr)
+    }
+
+    public func skipRebase(at repositoryURL: URL) throws -> GitCommandResult {
+        let root = try repositoryRoot(for: repositoryURL)
+        let result = try run(["-C", root.path, "rebase", "--skip"])
+        return GitCommandResult(stdout: result.stdout, stderr: result.stderr)
     }
 
     public func history(at repositoryURL: URL, limit: Int = 30) throws -> [GitCommit] {
@@ -451,6 +502,17 @@ public struct SystemGitEngine: GitEngine, Sendable {
         let check = try runAllowingFailure(["-C", root.path, "check-ref-format", "--branch", trimmed])
         guard check.status == 0 else { throw GitEngineError.invalidInput("Invalid branch name: \(trimmed)") }
         return trimmed
+    }
+
+    private func resolveLocalBranchCommit(_ branch: String, at root: URL) throws -> String {
+        let validated = try validateBranchName(branch, at: root)
+        let ref = "refs/heads/\(validated)^{commit}"
+        let resolved = try run(["-C", root.path, "rev-parse", "--verify", ref])
+            .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard resolved.count >= 7, resolved.allSatisfy({ $0.isHexDigit }) else {
+            throw GitEngineError.invalidOutput("Could not resolve branch \(validated) to a commit.")
+        }
+        return resolved
     }
 
     private func validateWorktreeDestination(_ url: URL, repositoryRoot: URL) throws -> URL {
