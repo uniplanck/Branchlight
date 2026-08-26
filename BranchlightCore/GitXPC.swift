@@ -6,7 +6,7 @@ import Foundation
 /// Finder remains cache-only and continues to emit App Group intents to the host.
 public enum BranchlightGitXPCContract {
     public static let serviceName = "com.uniplanck.Branchlight.GitService"
-    public static let protocolVersion = 2
+    public static let protocolVersion = 3
     public static let maximumMessageBytes = 1_048_576
 }
 
@@ -24,6 +24,14 @@ public enum BranchlightGitXPCContract {
         withReply reply: @escaping (Data?, NSError?) -> Void
     )
     func performMutation(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?, NSError?) -> Void
+    )
+    func recoveryCandidates(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?, NSError?) -> Void
+    )
+    func executeRecovery(
         _ requestData: Data,
         withReply reply: @escaping (Data?, NSError?) -> Void
     )
@@ -168,6 +176,112 @@ public struct GitXPCMutationResponse: Codable, Hashable, Sendable {
         self.protocolVersion = protocolVersion
         self.requestID = requestID
         self.output = output
+    }
+}
+
+/// A recovery candidate deliberately omits raw index/checkpoint bytes. Exact index
+/// snapshots stay inside the XPC mutation owner and never cross the transport boundary.
+public struct GitXPCRecoveryCandidate: Codable, Hashable, Identifiable, Sendable {
+    public let operationID: UUID
+    public let label: String
+    public let intent: GitMutationIntent
+    public let affectedPaths: [String]
+    public let target: String?
+    public let reason: String
+
+    public var id: UUID { operationID }
+
+    public init(
+        operationID: UUID,
+        label: String,
+        intent: GitMutationIntent,
+        affectedPaths: [String],
+        target: String?,
+        reason: String
+    ) {
+        self.operationID = operationID
+        self.label = label
+        self.intent = intent
+        self.affectedPaths = affectedPaths
+        self.target = target
+        self.reason = reason
+    }
+}
+
+public struct GitXPCRecoveryCandidatesRequest: Codable, Hashable, Sendable {
+    public let protocolVersion: Int
+    public let requestID: UUID
+    public let repositoryPath: String
+    public let limit: Int
+
+    public init(
+        protocolVersion: Int = BranchlightGitXPCContract.protocolVersion,
+        requestID: UUID = UUID(),
+        repositoryPath: String,
+        limit: Int = 50
+    ) {
+        self.protocolVersion = protocolVersion
+        self.requestID = requestID
+        self.repositoryPath = repositoryPath
+        self.limit = min(max(limit, 1), 200)
+    }
+}
+
+public struct GitXPCRecoveryCandidatesResponse: Codable, Hashable, Sendable {
+    public let protocolVersion: Int
+    public let requestID: UUID
+    public let candidates: [GitXPCRecoveryCandidate]
+
+    public init(
+        protocolVersion: Int = BranchlightGitXPCContract.protocolVersion,
+        requestID: UUID,
+        candidates: [GitXPCRecoveryCandidate]
+    ) {
+        self.protocolVersion = protocolVersion
+        self.requestID = requestID
+        self.candidates = candidates
+    }
+}
+
+public enum GitXPCRecoveryOutcome: String, Codable, Hashable, Sendable {
+    case exactIndexRestored
+    case branchSwitched
+    case revertCreated
+    case worktreeRemoved
+}
+
+public struct GitXPCRecoveryExecuteRequest: Codable, Hashable, Sendable {
+    public let protocolVersion: Int
+    public let requestID: UUID
+    public let repositoryPath: String
+    public let operationID: UUID
+
+    public init(
+        protocolVersion: Int = BranchlightGitXPCContract.protocolVersion,
+        requestID: UUID = UUID(),
+        repositoryPath: String,
+        operationID: UUID
+    ) {
+        self.protocolVersion = protocolVersion
+        self.requestID = requestID
+        self.repositoryPath = repositoryPath
+        self.operationID = operationID
+    }
+}
+
+public struct GitXPCRecoveryExecuteResponse: Codable, Hashable, Sendable {
+    public let protocolVersion: Int
+    public let requestID: UUID
+    public let outcome: GitXPCRecoveryOutcome
+
+    public init(
+        protocolVersion: Int = BranchlightGitXPCContract.protocolVersion,
+        requestID: UUID,
+        outcome: GitXPCRecoveryOutcome
+    ) {
+        self.protocolVersion = protocolVersion
+        self.requestID = requestID
+        self.outcome = outcome
     }
 }
 
