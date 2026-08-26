@@ -248,3 +248,170 @@ final class GitConflictWorkspaceTests: XCTestCase {
         return process.terminationStatus
     }
 }
+
+final class GitHistoryMutationEngineTests: XCTestCase {
+    private let engine = SystemGitEngine()
+
+    func testCherryPickAppliesSelectedFullCommitHash() throws {
+        let fixture = try makeFixture(prefix: "BranchlightCherryPick")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        try runGit(["checkout", "-b", "source"], at: fixture.repository)
+        try "picked\n".write(
+            to: fixture.repository.appendingPathComponent("picked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "picked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "pick me"], at: fixture.repository)
+        let sourceCommit = try gitOutput(["rev-parse", "HEAD"], at: fixture.repository)
+
+        try runGit(["checkout", "main"], at: fixture.repository)
+        _ = try engine.cherryPickCommit(at: fixture.repository, commitHash: sourceCommit)
+
+        XCTAssertEqual(try engine.history(at: fixture.repository, limit: 1).first?.subject, "pick me")
+        XCTAssertEqual(
+            try String(contentsOf: fixture.repository.appendingPathComponent("picked.txt"), encoding: .utf8),
+            "picked\n"
+        )
+        XCTAssertTrue(try engine.status(at: fixture.repository).isClean)
+    }
+
+    func testRevertCreatesNewCommitAndRestoresPreviousContent() throws {
+        let fixture = try makeFixture(prefix: "BranchlightRevert")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        try "changed\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "change to revert"], at: fixture.repository)
+        let changedCommit = try gitOutput(["rev-parse", "HEAD"], at: fixture.repository)
+
+        _ = try engine.revertCommit(at: fixture.repository, commitHash: changedCommit)
+
+        XCTAssertEqual(
+            try String(contentsOf: fixture.repository.appendingPathComponent("tracked.txt"), encoding: .utf8),
+            "base\n"
+        )
+        let history = try engine.history(at: fixture.repository, limit: 2)
+        XCTAssertEqual(history.count, 2)
+        XCTAssertTrue(history[0].subject.localizedCaseInsensitiveContains("revert"))
+        XCTAssertEqual(history[1].hash, changedCommit)
+        XCTAssertTrue(try engine.status(at: fixture.repository).isClean)
+    }
+
+    func testCherryPickConflictCanBeAbortedWithoutLeavingOperationState() async throws {
+        let fixture = try makeFixture(prefix: "BranchlightCherryPickAbort")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        try runGit(["checkout", "-b", "source"], at: fixture.repository)
+        try "source\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "source conflict"], at: fixture.repository)
+        let sourceCommit = try gitOutput(["rev-parse", "HEAD"], at: fixture.repository)
+
+        try runGit(["checkout", "main"], at: fixture.repository)
+        try "main\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "main conflict"], at: fixture.repository)
+
+        XCTAssertThrowsError(try engine.cherryPickCommit(at: fixture.repository, commitHash: sourceCommit))
+        var intelligence = try await InProcessGitService().repositoryIntelligence(at: fixture.repository)
+        XCTAssertEqual(intelligence.operationMode, .cherryPicking)
+        XCTAssertEqual(intelligence.conflictCount, 1)
+
+        _ = try engine.abortCherryPick(at: fixture.repository)
+        intelligence = try await InProcessGitService().repositoryIntelligence(at: fixture.repository)
+        XCTAssertEqual(intelligence.operationMode, .normal)
+        XCTAssertTrue(try engine.status(at: fixture.repository).isClean)
+        XCTAssertEqual(
+            try String(contentsOf: fixture.repository.appendingPathComponent("tracked.txt"), encoding: .utf8),
+            "main\n"
+        )
+    }
+
+    func testHistoryMutationsRejectAnythingButFullHexCommitHash() throws {
+        let fixture = try makeFixture(prefix: "BranchlightHistoryValidation")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertThrowsError(try engine.cherryPickCommit(at: fixture.repository, commitHash: "HEAD"))
+        XCTAssertThrowsError(try engine.revertCommit(at: fixture.repository, commitHash: "--no-edit"))
+        XCTAssertThrowsError(try engine.revertCommit(at: fixture.repository, commitHash: "deadbeef"))
+    }
+
+    private func makeFixture(prefix: String) throws -> (root: URL, repository: URL) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
+        let repository = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try runGit(["init", "-b", "main"], at: repository)
+        try runGit(["config", "user.email", "branchlight-history@example.invalid"], at: repository)
+        try runGit(["config", "user.name", "Branchlight History Tests"], at: repository)
+        try "base\n".write(
+            to: repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: repository)
+        try runGit(["commit", "-m", "initial"], at: repository)
+        return (root, repository)
+    }
+
+    private func runGit(_ arguments: [String], at directory: URL) throws {
+        let status = try runGitAllowingFailure(arguments, at: directory)
+        guard status == 0 else {
+            throw NSError(
+                domain: "GitHistoryMutationEngineTests.Git",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed"]
+            )
+        }
+    }
+
+    private func gitOutput(_ arguments: [String], at directory: URL) throws -> String {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", directory.path] + arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+        try process.run()
+        let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "GitHistoryMutationEngineTests.Git", code: Int(process.terminationStatus))
+        }
+        return (String(data: stdout, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func runGitAllowingFailure(_ arguments: [String], at directory: URL) throws -> Int32 {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", directory.path] + arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+        try process.run()
+        _ = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return process.terminationStatus
+    }
+}
