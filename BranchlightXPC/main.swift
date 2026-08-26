@@ -15,18 +15,26 @@ private final class XPCReplyBox: @unchecked Sendable {
 
 /// Foundation invokes exported XPC methods from its own connection queues. The service
 /// owns only immutable references to Branchlight's Sendable runtime primitives; mutable
-/// repository coordination itself is actor-backed inside `InProcessGitService`.
+/// repository coordination itself is actor-backed by one coordinator shared by normal
+/// and history mutations.
 private final class BranchlightGitXPCService: NSObject, BranchlightGitXPCProtocol, @unchecked Sendable {
     private let gitService: InProcessGitService
+    private let historyMutationService: CoordinatedGitHistoryMutationService
 
     override init() {
         let engine = SystemGitEngine()
         let coordinator = GitOperationCoordinator()
         let registry = GitRepositoryRegistry()
-        self.gitService = InProcessGitService(
+        let base = InProcessGitService(
             engine: engine,
             coordinator: coordinator,
             registry: registry
+        )
+        self.gitService = base
+        self.historyMutationService = CoordinatedGitHistoryMutationService(
+            engine: engine,
+            coordinator: coordinator,
+            base: base
         )
         super.init()
     }
@@ -89,10 +97,204 @@ private final class BranchlightGitXPCService: NSObject, BranchlightGitXPCProtoco
         }
     }
 
+    func performMutation(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?, NSError?) -> Void
+    ) {
+        let replyBox = XPCReplyBox(reply)
+        let gitService = gitService
+        let historyMutationService = historyMutationService
+
+        Task { @Sendable in
+            do {
+                let request = try GitXPCCodec.decode(
+                    GitXPCMutationRequest.self,
+                    from: requestData
+                )
+                try GitXPCCodec.validateProtocolVersion(request.protocolVersion)
+                let repositoryURL = try Self.validatedRepositoryURL(request.repositoryPath)
+                let output = try await Self.execute(
+                    request.mutation,
+                    repositoryURL: repositoryURL,
+                    gitService: gitService,
+                    historyMutationService: historyMutationService
+                )
+                let response = GitXPCMutationResponse(
+                    requestID: request.requestID,
+                    output: output
+                )
+                replyBox.send(try GitXPCCodec.encode(response), error: nil)
+            } catch {
+                replyBox.send(nil, error: error as NSError)
+            }
+        }
+    }
+
+    private static func execute(
+        _ mutation: GitXPCMutation,
+        repositoryURL: URL,
+        gitService: InProcessGitService,
+        historyMutationService: CoordinatedGitHistoryMutationService
+    ) async throws -> GitXPCCommandOutput? {
+        switch mutation {
+        case .stage(let paths):
+            try await gitService.stage(at: repositoryURL, paths: paths)
+            return nil
+
+        case .unstage(let paths):
+            try await gitService.unstage(at: repositoryURL, paths: paths)
+            return nil
+
+        case .applyPatch(let patch, let reverse):
+            try await gitService.applyPatch(at: repositoryURL, patch: patch, reverse: reverse)
+            return nil
+
+        case .commit(let message, let amend):
+            return output(try await gitService.commit(at: repositoryURL, message: message, amend: amend))
+
+        case .fetch:
+            return output(try await gitService.fetch(at: repositoryURL))
+
+        case .pullFastForwardOnly:
+            return output(try await gitService.pullFastForwardOnly(at: repositoryURL))
+
+        case .push:
+            return output(try await gitService.push(at: repositoryURL))
+
+        case .switchBranch(let name):
+            try await gitService.switchBranch(at: repositoryURL, name: name)
+            return nil
+
+        case .merge(let branch, let confirmationProvided):
+            return output(
+                try await gitService.merge(
+                    at: repositoryURL,
+                    branch: branch,
+                    confirmationProvided: confirmationProvided
+                )
+            )
+
+        case .continueMerge:
+            return output(try await gitService.continueMerge(at: repositoryURL))
+
+        case .abortMerge:
+            return output(try await gitService.abortMerge(at: repositoryURL))
+
+        case .rebase(let onto, let confirmationProvided):
+            return output(
+                try await gitService.rebase(
+                    at: repositoryURL,
+                    onto: onto,
+                    confirmationProvided: confirmationProvided
+                )
+            )
+
+        case .continueRebase:
+            return output(try await gitService.continueRebase(at: repositoryURL))
+
+        case .abortRebase:
+            return output(try await gitService.abortRebase(at: repositoryURL))
+
+        case .skipRebase:
+            return output(try await gitService.skipRebase(at: repositoryURL))
+
+        case .createStash(let message, let includeUntracked):
+            return output(
+                try await gitService.createStash(
+                    at: repositoryURL,
+                    message: message,
+                    includeUntracked: includeUntracked
+                )
+            )
+
+        case .applyStash(let reference, let pop):
+            return output(
+                try await gitService.applyStash(
+                    at: repositoryURL,
+                    reference: reference,
+                    pop: pop
+                )
+            )
+
+        case .dropStash(let reference):
+            return output(try await gitService.dropStash(at: repositoryURL, reference: reference))
+
+        case .addWorktree(let path, let branch):
+            return output(
+                try await gitService.addWorktree(
+                    at: repositoryURL,
+                    path: try validatedDestinationURL(path),
+                    branch: branch
+                )
+            )
+
+        case .addWorktreeWithNewBranch(let path, let newBranch, let startPoint):
+            return output(
+                try await gitService.addWorktree(
+                    at: repositoryURL,
+                    path: try validatedDestinationURL(path),
+                    newBranch: newBranch,
+                    startPoint: startPoint
+                )
+            )
+
+        case .removeWorktree(let path):
+            return output(
+                try await gitService.removeWorktree(
+                    at: repositoryURL,
+                    path: try validatedDestinationURL(path)
+                )
+            )
+
+        case .cherryPick(let commitHash, let confirmationProvided):
+            return output(
+                try await historyMutationService.cherryPick(
+                    at: repositoryURL,
+                    commitHash: commitHash,
+                    confirmationProvided: confirmationProvided
+                )
+            )
+
+        case .continueCherryPick:
+            return output(try await historyMutationService.continueCherryPick(at: repositoryURL))
+
+        case .abortCherryPick:
+            return output(try await historyMutationService.abortCherryPick(at: repositoryURL))
+
+        case .revert(let commitHash, let confirmationProvided):
+            return output(
+                try await historyMutationService.revert(
+                    at: repositoryURL,
+                    commitHash: commitHash,
+                    confirmationProvided: confirmationProvided
+                )
+            )
+
+        case .continueRevert:
+            return output(try await historyMutationService.continueRevert(at: repositoryURL))
+
+        case .abortRevert:
+            return output(try await historyMutationService.abortRevert(at: repositoryURL))
+        }
+    }
+
+    private static func output(_ result: GitCommandResult) -> GitXPCCommandOutput {
+        GitXPCCommandOutput(stdout: result.stdout, stderr: result.stderr)
+    }
+
     private static func validatedRepositoryURL(_ path: String) throws -> URL {
         guard path.hasPrefix("/"), !path.contains("\0") else {
             throw GitEngineError.invalidInput(
                 "XPC repository requests require an absolute local path."
+            )
+        }
+        return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+    }
+
+    private static func validatedDestinationURL(_ path: String) throws -> URL {
+        guard path.hasPrefix("/"), !path.contains("\0") else {
+            throw GitEngineError.invalidInput(
+                "XPC worktree destinations require an absolute local path."
             )
         }
         return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
