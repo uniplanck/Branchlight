@@ -29,8 +29,6 @@ final class XPCServiceIntegrationTests: XCTestCase {
         let version = try await probe(proxy)
         XCTAssertEqual(version, BranchlightGitXPCContract.protocolVersion)
 
-        // Resolve from a nested selection, not just the repository root. This is the
-        // exact read path used by Finder open-path requests and the Host repository picker.
         let identityRequest = GitXPCRepositoryIdentityRequest(
             repositoryPath: nested.standardizedFileURL.path
         )
@@ -59,8 +57,6 @@ final class XPCServiceIntegrationTests: XCTestCase {
         XCTAssertEqual(initial.conflictCount, 0)
         XCTAssertNil(initial.upstream)
 
-        // Mutate only the isolated temporary repository. This proves the XPC process owns
-        // a working mutation coordinator without touching any user repository.
         let relativePath = "Sources/Feature/change.txt"
         let stageResponse = try await performMutation(
             proxy,
@@ -118,6 +114,41 @@ final class XPCServiceIntegrationTests: XCTestCase {
         let reconciled = try await reads.loadRepository(at: fixture, includeMetadata: true, historyLimit: 5)
         XCTAssertTrue(reconciled.snapshot.isClean)
         XCTAssertEqual(reconciled.history?.first?.subject, "test: host mutation adapter")
+    }
+
+    func testExactIndexRecoveryExecutesInsideBundledXPCOwner() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Branchlight-XPC-Exact-Recovery-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        try runGit(["init", "-b", "main"], at: fixture)
+        try runGit(["config", "user.name", "Branchlight XPC Recovery Test"], at: fixture)
+        try runGit(["config", "user.email", "branchlight-xpc-recovery@example.invalid"], at: fixture)
+        let tracked = fixture.appendingPathComponent("tracked.txt")
+        try Data("base\n".utf8).write(to: tracked, options: [.atomic])
+        try runGit(["add", "tracked.txt"], at: fixture)
+        try runGit(["commit", "-m", "initial"], at: fixture)
+
+        try Data("modified\n".utf8).write(to: tracked, options: [.atomic])
+        let client = BundledGitXPCClient(readTimeoutSeconds: 5, mutationTimeoutSeconds: 15)
+        _ = try await client.performMutation(at: fixture, mutation: .stage(paths: ["tracked.txt"]))
+        XCTAssertEqual(try gitOutput(["diff", "--cached", "--name-only"], at: fixture), "tracked.txt")
+
+        let candidates = try await client.recoveryCandidates(at: fixture, limit: 20)
+        let candidate = try XCTUnwrap(
+            candidates.first(where: {
+                $0.intent == .stage && $0.affectedPaths == ["tracked.txt"]
+            })
+        )
+        let outcome = try await client.executeRecovery(
+            at: fixture,
+            operationID: candidate.operationID
+        )
+        XCTAssertEqual(outcome, .exactIndexRestored)
+
+        XCTAssertEqual(try gitOutput(["diff", "--cached", "--name-only"], at: fixture), "")
+        XCTAssertEqual(try gitOutput(["diff", "--name-only"], at: fixture), "tracked.txt")
     }
 
     private func makeProxy(connection: NSXPCConnection) throws -> BranchlightGitXPCProtocol {
@@ -239,6 +270,32 @@ final class XPCServiceIntegrationTests: XCTestCase {
     }
 
     private func runGit(_ arguments: [String], at directory: URL) throws {
+        let result = try runGitResult(arguments, at: directory)
+        guard result.status == 0 else {
+            throw NSError(
+                domain: "BranchlightTests.Git",
+                code: Int(result.status),
+                userInfo: [NSLocalizedDescriptionKey: result.stderr]
+            )
+        }
+    }
+
+    private func gitOutput(_ arguments: [String], at directory: URL) throws -> String {
+        let result = try runGitResult(arguments, at: directory)
+        guard result.status == 0 else {
+            throw NSError(
+                domain: "BranchlightTests.Git",
+                code: Int(result.status),
+                userInfo: [NSLocalizedDescriptionKey: result.stderr]
+            )
+        }
+        return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func runGitResult(
+        _ arguments: [String],
+        at directory: URL
+    ) throws -> (status: Int32, stdout: String, stderr: String) {
         let process = Process()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -248,16 +305,14 @@ final class XPCServiceIntegrationTests: XCTestCase {
         process.standardError = stderrPipe
         process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
         try process.run()
-        _ = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
         let stderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw NSError(
-                domain: "BranchlightTests.Git",
-                code: Int(process.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: String(data: stderr, encoding: .utf8) ?? "git failed"]
-            )
-        }
+        return (
+            process.terminationStatus,
+            String(data: stdout, encoding: .utf8) ?? "",
+            String(data: stderr, encoding: .utf8) ?? ""
+        )
     }
 }
 
