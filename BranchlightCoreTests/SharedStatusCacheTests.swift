@@ -100,16 +100,67 @@ final class SharedStatusCacheTests: XCTestCase {
         let (cache, directory) = try makeCache()
         defer { try? FileManager.default.removeItem(at: directory) }
 
+        let requestedAt = Date(timeIntervalSince1970: 123)
         let intent = FinderIntent(
             action: .stage,
             repositoryRoot: "/tmp/example-repo",
             paths: ["Sources/File.swift"],
-            requestedAt: Date(timeIntervalSince1970: 123)
+            requestedAt: requestedAt
         )
         try cache.setPendingFinderIntent(intent)
 
-        XCTAssertEqual(cache.consumePendingFinderIntent(), intent)
-        XCTAssertNil(cache.consumePendingFinderIntent())
+        let now = requestedAt.addingTimeInterval(30)
+        XCTAssertEqual(cache.consumePendingFinderIntent(now: now), intent)
+        XCTAssertNil(cache.consumePendingFinderIntent(now: now))
+    }
+
+    func testStaleFinderIntentIsConsumedWithoutBeingReturned() throws {
+        let (cache, directory) = try makeCache()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSince1970: 10_000)
+        let intent = FinderIntent(
+            action: .unstage,
+            repositoryRoot: "/tmp/example-repo",
+            paths: ["Sources/File.swift"],
+            requestedAt: now.addingTimeInterval(-FinderIntent.defaultMaximumAge - 1)
+        )
+        try cache.setPendingFinderIntent(intent)
+
+        XCTAssertNil(cache.consumePendingFinderIntent(now: now))
+        XCTAssertNil(cache.consumePendingFinderIntent(now: now))
+    }
+
+    func testFinderIntentWithinFreshnessWindowIsReturned() throws {
+        let (cache, directory) = try makeCache()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSince1970: 20_000)
+        let intent = FinderIntent(
+            action: .stage,
+            repositoryRoot: "/tmp/example-repo",
+            paths: ["A.swift"],
+            requestedAt: now.addingTimeInterval(-FinderIntent.defaultMaximumAge + 1)
+        )
+        try cache.setPendingFinderIntent(intent)
+
+        XCTAssertEqual(cache.consumePendingFinderIntent(now: now), intent)
+    }
+
+    func testFinderIntentWithExcessiveFutureClockSkewIsRejected() throws {
+        let (cache, directory) = try makeCache()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSince1970: 30_000)
+        let intent = FinderIntent(
+            action: .stage,
+            repositoryRoot: "/tmp/example-repo",
+            paths: ["A.swift"],
+            requestedAt: now.addingTimeInterval(FinderIntent.maximumFutureClockSkew + 1)
+        )
+        try cache.setPendingFinderIntent(intent)
+
+        XCTAssertNil(cache.consumePendingFinderIntent(now: now))
     }
 
     func testCorruptEnvelopeIsQuarantinedAndCacheRecovers() throws {
