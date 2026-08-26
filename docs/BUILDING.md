@@ -35,6 +35,8 @@ xcodebuild \
 
 This compiles the Host, Core, Finder Extension, bundled Git XPC service, and tests without provisioning the Finder runtime.
 
+The app-hosted XPC integration tests exercise the real bundled service process against isolated temporary Git repositories. Coverage includes repository reads, direct XPC stage/unstage, and the Host mutation adapter crossing XPC for stage/commit before read-back reconciliation.
+
 For the optimized Release bundle gate, use the canonical script rather than reproducing its build settings manually:
 
 ```bash
@@ -52,7 +54,7 @@ Host, Finder Extension, and Git XPC version/build numbers must match.
 
 ## Fully signed Finder + XPC integration
 
-Finder Sync, App Group communication, and real bundled-XPC acceptance require a signing configuration belonging to your Apple Development team.
+Finder Sync, App Group communication, and final real-machine XPC acceptance require a signing configuration belonging to your Apple Development team.
 
 ### 1. Choose your identifiers
 
@@ -108,9 +110,24 @@ If macOS does not enable the extension automatically, enable **Branchlight Finde
 
 ### 7. Exercise a repository
 
-Open Branchlight and choose a Git repository. The Host writes repository snapshots to the shared App Group cache and Finder consumes that cache only. Finder must not spawn Git, perform GitHub HTTP calls, or connect directly to the Git XPC service.
+Use a disposable or otherwise safe repository for signed runtime acceptance.
 
-The current XPC migration starts with a versioned probe/read-only repository-identity contract. Git mutations remain under the existing in-process coordinator until the complete mutation surface can move behind one authoritative XPC owner. Do not add a silent mutation fallback from XPC to in-process execution: an interrupted XPC request may already have changed repository state.
+Open Branchlight and choose the repository. Confirm that repository state appears in the Host and that Finder badges/menu state are populated from the App Group cache. Finder must not spawn Git, perform GitHub HTTP calls, or connect directly to the Git XPC service.
+
+Then exercise at least these Host actions:
+
+1. Stage a changed file.
+2. Unstage it.
+3. Stage it again and create a test commit.
+4. Refresh and confirm the repository reconciles to the state reported by real Git.
+5. If using merge/rebase/cherry-pick/revert acceptance, induce only controlled disposable-repository cases and verify conflict/abort flows.
+
+All Git mutations now cross the bundled XPC boundary and converge on the service-side repository coordinator. Read-only fallback may use the Host implementation, but **mutation fallback/replay is forbidden**. If an XPC mutation times out or loses its reply, refresh/reconcile repository state before any retry because the remote process may already have changed Git state.
+
+Signed acceptance is complete only when both of these are observed on the real Mac:
+
+- Finder Extension behavior works with the signed Host/App Group pair.
+- Host mutations succeed through the launch-on-demand bundled XPC service and reconcile correctly after completion/failure.
 
 ## Signed Release / notarization
 
