@@ -195,24 +195,40 @@ struct GitAILocalCommandProvider: GitAIProvider, Sendable {
         prompt: String,
         configuration: GitAILocalCommandConfiguration
     ) throws -> String {
-        let isolatedWorkingDirectory = FileManager.default.temporaryDirectory
+        let fileManager = FileManager.default
+        let isolatedWorkingDirectory = fileManager.temporaryDirectory
             .appendingPathComponent("Branchlight-AI-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(
+        try fileManager.createDirectory(
             at: isolatedWorkingDirectory,
             withIntermediateDirectories: true
         )
-        defer { try? FileManager.default.removeItem(at: isolatedWorkingDirectory) }
+        defer { try? fileManager.removeItem(at: isolatedWorkingDirectory) }
+
+        let stdinURL = isolatedWorkingDirectory.appendingPathComponent("stdin.txt")
+        let stdoutURL = isolatedWorkingDirectory.appendingPathComponent("stdout.txt")
+        let stderrURL = isolatedWorkingDirectory.appendingPathComponent("stderr.txt")
+        try Data(prompt.utf8).write(to: stdinURL, options: .atomic)
+        guard fileManager.createFile(atPath: stdoutURL.path, contents: Data()),
+              fileManager.createFile(atPath: stderrURL.path, contents: Data()) else {
+            throw GitAILocalCommandError.emptyOutput
+        }
+
+        let stdinHandle = try FileHandle(forReadingFrom: stdinURL)
+        let stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
+        let stderrHandle = try FileHandle(forWritingTo: stderrURL)
+        defer {
+            try? stdinHandle.close()
+            try? stdoutHandle.close()
+            try? stderrHandle.close()
+        }
 
         let process = Process()
-        let stdinPipe = Pipe()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
         process.executableURL = configuration.executableURL
         process.arguments = configuration.arguments
         process.currentDirectoryURL = isolatedWorkingDirectory
-        process.standardInput = stdinPipe
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
+        process.standardInput = stdinHandle
+        process.standardOutput = stdoutHandle
+        process.standardError = stderrHandle
 
         let inherited = ProcessInfo.processInfo.environment
         var environment: [String: String] = [:]
@@ -225,9 +241,6 @@ struct GitAILocalCommandProvider: GitAIProvider, Sendable {
         process.environment = environment
 
         try process.run()
-        stdinPipe.fileHandleForWriting.write(Data(prompt.utf8))
-        try? stdinPipe.fileHandleForWriting.close()
-
         let deadline = Date().addingTimeInterval(configuration.timeout)
         while process.isRunning {
             if Task.isCancelled {
@@ -240,12 +253,21 @@ struct GitAILocalCommandProvider: GitAIProvider, Sendable {
                 process.waitUntilExit()
                 throw GitAILocalCommandError.timedOut
             }
+            if fileSize(at: stdoutURL, fileManager: fileManager) > configuration.maximumOutputBytes ||
+                fileSize(at: stderrURL, fileManager: fileManager) > configuration.maximumOutputBytes {
+                process.terminate()
+                process.waitUntilExit()
+                throw GitAILocalCommandError.outputTooLarge
+            }
             Thread.sleep(forTimeInterval: 0.05)
         }
 
-        let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        guard stdout.count <= configuration.maximumOutputBytes else {
+        try? stdoutHandle.synchronize()
+        try? stderrHandle.synchronize()
+        let stdout = try Data(contentsOf: stdoutURL)
+        let stderr = try Data(contentsOf: stderrURL)
+        guard stdout.count <= configuration.maximumOutputBytes,
+              stderr.count <= configuration.maximumOutputBytes else {
             throw GitAILocalCommandError.outputTooLarge
         }
         guard process.terminationStatus == 0 else {
@@ -259,6 +281,11 @@ struct GitAILocalCommandProvider: GitAIProvider, Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !response.isEmpty else { throw GitAILocalCommandError.emptyOutput }
         return response
+    }
+
+    private static func fileSize(at url: URL, fileManager: FileManager) -> Int {
+        let attributes = try? fileManager.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? NSNumber)?.intValue ?? 0
     }
 }
 
