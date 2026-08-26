@@ -195,12 +195,21 @@ struct GitAILocalCommandProvider: GitAIProvider, Sendable {
         prompt: String,
         configuration: GitAILocalCommandConfiguration
     ) throws -> String {
+        let isolatedWorkingDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Branchlight-AI-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: isolatedWorkingDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: isolatedWorkingDirectory) }
+
         let process = Process()
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         process.executableURL = configuration.executableURL
         process.arguments = configuration.arguments
+        process.currentDirectoryURL = isolatedWorkingDirectory
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
@@ -211,6 +220,8 @@ struct GitAILocalCommandProvider: GitAIProvider, Sendable {
         if let home = inherited["HOME"] { environment["HOME"] = home }
         if let lang = inherited["LANG"] { environment["LANG"] = lang }
         environment["TERM"] = "dumb"
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        environment["NO_COLOR"] = "1"
         process.environment = environment
 
         try process.run()
