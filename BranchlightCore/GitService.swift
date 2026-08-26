@@ -36,6 +36,7 @@ public actor GitOperationCoordinator {
     public func run<T: Sendable>(
         repository: GitRepositoryIdentity,
         label: String,
+        descriptor: GitOperationDescriptor? = nil,
         operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         let key = repository.coordinationKey
@@ -49,6 +50,7 @@ public actor GitOperationCoordinator {
                     id: operationID,
                     repository: repository,
                     label: label,
+                    descriptor: descriptor,
                     state: .cancelled,
                     startedAt: requestedAt,
                     finishedAt: Date(),
@@ -63,6 +65,7 @@ public actor GitOperationCoordinator {
             id: operationID,
             repository: repository,
             label: label,
+            descriptor: descriptor,
             state: .running,
             startedAt: requestedAt,
             finishedAt: nil,
@@ -133,6 +136,7 @@ public actor GitOperationCoordinator {
                 id: running.id,
                 repository: running.repository,
                 label: running.label,
+                descriptor: running.descriptor,
                 state: state,
                 startedAt: running.startedAt,
                 finishedAt: Date(),
@@ -295,41 +299,81 @@ public struct InProcessGitService: GitService, Sendable {
     }
 
     public func stage(at repositoryURL: URL, paths: [String]) async throws {
-        try await mutate(at: repositoryURL, label: "stage \(paths.count) path(s)") { engine, root in
+        try await mutate(
+            at: repositoryURL,
+            label: "stage \(paths.count) path(s)",
+            descriptor: GitOperationDescriptor(intent: .stage, affectedPaths: paths)
+        ) { engine, root in
             try engine.stage(at: root, paths: paths)
         }
     }
 
     public func unstage(at repositoryURL: URL, paths: [String]) async throws {
-        try await mutate(at: repositoryURL, label: "unstage \(paths.count) path(s)") { engine, root in
+        try await mutate(
+            at: repositoryURL,
+            label: "unstage \(paths.count) path(s)",
+            descriptor: GitOperationDescriptor(intent: .unstage, affectedPaths: paths)
+        ) { engine, root in
             try engine.unstage(at: root, paths: paths)
         }
     }
 
     public func applyPatch(at repositoryURL: URL, patch: String, reverse: Bool = false) async throws {
-        try await mutate(at: repositoryURL, label: reverse ? "reverse staged patch" : "apply staged patch") { engine, root in
+        try await mutate(
+            at: repositoryURL,
+            label: reverse ? "reverse staged patch" : "apply staged patch",
+            descriptor: GitOperationDescriptor(
+                intent: reverse ? .unstage : .stage,
+                target: "patch",
+                parameters: ["reverse": String(reverse)]
+            )
+        ) { engine, root in
             try engine.applyPatch(at: root, patch: patch, reverse: reverse)
         }
     }
 
     public func commit(at repositoryURL: URL, message: String, amend: Bool) async throws -> GitCommandResult {
-        try await mutate(at: repositoryURL, label: amend ? "amend commit" : "commit") { engine, root in
+        try await mutate(
+            at: repositoryURL,
+            label: amend ? "amend commit" : "commit",
+            descriptor: GitOperationDescriptor(
+                intent: .commit,
+                target: amend ? "amend" : nil,
+                parameters: ["amend": String(amend)]
+            )
+        ) { engine, root in
             try engine.commit(at: root, message: message, amend: amend)
         }
     }
 
     public func fetch(at repositoryURL: URL) async throws -> GitCommandResult {
-        try await mutate(at: repositoryURL, label: "fetch") { engine, root in try engine.fetch(at: root) }
+        try await mutate(
+            at: repositoryURL,
+            label: "fetch",
+            descriptor: GitOperationDescriptor(intent: .fetch)
+        ) { engine, root in
+            try engine.fetch(at: root)
+        }
     }
 
     public func pullFastForwardOnly(at repositoryURL: URL) async throws -> GitCommandResult {
-        try await mutate(at: repositoryURL, label: "pull --ff-only") { engine, root in
+        try await mutate(
+            at: repositoryURL,
+            label: "pull --ff-only",
+            descriptor: GitOperationDescriptor(intent: .pull, parameters: ["strategy": "ff-only"])
+        ) { engine, root in
             try engine.pullFastForwardOnly(at: root)
         }
     }
 
     public func push(at repositoryURL: URL) async throws -> GitCommandResult {
-        try await mutate(at: repositoryURL, label: "push") { engine, root in try engine.push(at: root) }
+        try await mutate(
+            at: repositoryURL,
+            label: "push",
+            descriptor: GitOperationDescriptor(intent: .push)
+        ) { engine, root in
+            try engine.push(at: root)
+        }
     }
 
     public func branches(at repositoryURL: URL) async throws -> [GitBranch] {
@@ -338,7 +382,11 @@ public struct InProcessGitService: GitService, Sendable {
     }
 
     public func switchBranch(at repositoryURL: URL, name: String) async throws {
-        try await mutate(at: repositoryURL, label: "switch branch") { engine, root in
+        try await mutate(
+            at: repositoryURL,
+            label: "switch branch",
+            descriptor: GitOperationDescriptor(intent: .switchBranch, target: name)
+        ) { engine, root in
             try engine.switchBranch(at: root, name: name)
         }
     }
@@ -364,19 +412,39 @@ public struct InProcessGitService: GitService, Sendable {
     }
 
     public func createStash(at repositoryURL: URL, message: String, includeUntracked: Bool) async throws -> GitCommandResult {
-        try await mutate(at: repositoryURL, label: "create stash") { engine, root in
+        try await mutate(
+            at: repositoryURL,
+            label: "create stash",
+            descriptor: GitOperationDescriptor(
+                intent: .stashCreate,
+                target: message,
+                parameters: ["includeUntracked": String(includeUntracked)]
+            )
+        ) { engine, root in
             try engine.createStash(at: root, message: message, includeUntracked: includeUntracked)
         }
     }
 
     public func applyStash(at repositoryURL: URL, reference: String, pop: Bool) async throws -> GitCommandResult {
-        try await mutate(at: repositoryURL, label: pop ? "pop stash" : "apply stash") { engine, root in
+        try await mutate(
+            at: repositoryURL,
+            label: pop ? "pop stash" : "apply stash",
+            descriptor: GitOperationDescriptor(
+                intent: .stashApply,
+                reference: reference,
+                parameters: ["mode": pop ? "pop" : "apply"]
+            )
+        ) { engine, root in
             try engine.applyStash(at: root, reference: reference, pop: pop)
         }
     }
 
     public func dropStash(at repositoryURL: URL, reference: String) async throws -> GitCommandResult {
-        try await mutate(at: repositoryURL, label: "drop stash") { engine, root in
+        try await mutate(
+            at: repositoryURL,
+            label: "drop stash",
+            descriptor: GitOperationDescriptor(intent: .stashDrop, reference: reference)
+        ) { engine, root in
             try engine.dropStash(at: root, reference: reference)
         }
     }
@@ -387,19 +455,43 @@ public struct InProcessGitService: GitService, Sendable {
     }
 
     public func addWorktree(at repositoryURL: URL, path: URL, branch: String) async throws -> GitCommandResult {
-        try await mutate(at: repositoryURL, label: "add worktree") { engine, root in
+        try await mutate(
+            at: repositoryURL,
+            label: "add worktree",
+            descriptor: GitOperationDescriptor(
+                intent: .worktreeAdd,
+                reference: branch,
+                target: path.standardizedFileURL.path
+            )
+        ) { engine, root in
             try engine.addWorktree(at: root, path: path, branch: branch)
         }
     }
 
     public func addWorktree(at repositoryURL: URL, path: URL, newBranch: String, startPoint: String) async throws -> GitCommandResult {
-        try await mutate(at: repositoryURL, label: "add worktree with branch") { engine, root in
+        try await mutate(
+            at: repositoryURL,
+            label: "add worktree with branch",
+            descriptor: GitOperationDescriptor(
+                intent: .worktreeAdd,
+                reference: newBranch,
+                target: path.standardizedFileURL.path,
+                parameters: ["startPoint": startPoint, "createsBranch": "true"]
+            )
+        ) { engine, root in
             try engine.addWorktree(at: root, path: path, newBranch: newBranch, startPoint: startPoint)
         }
     }
 
     public func removeWorktree(at repositoryURL: URL, path: URL) async throws -> GitCommandResult {
-        try await mutate(at: repositoryURL, label: "remove worktree") { engine, root in
+        try await mutate(
+            at: repositoryURL,
+            label: "remove worktree",
+            descriptor: GitOperationDescriptor(
+                intent: .worktreeRemove,
+                target: path.standardizedFileURL.path
+            )
+        ) { engine, root in
             try engine.removeWorktree(at: root, path: path)
         }
     }
@@ -419,11 +511,16 @@ public struct InProcessGitService: GitService, Sendable {
     private func mutate<T: Sendable>(
         at repositoryURL: URL,
         label: String,
+        descriptor: GitOperationDescriptor,
         operation: @escaping @Sendable (SystemGitEngine, URL) throws -> T
     ) async throws -> T {
         let identity = try await repositoryIdentity(at: repositoryURL)
         let engine = engine
-        return try await coordinator.run(repository: identity, label: label) {
+        return try await coordinator.run(
+            repository: identity,
+            label: label,
+            descriptor: descriptor
+        ) {
             try await Task.detached(priority: .userInitiated) {
                 try operation(engine, identity.repositoryURL)
             }.value
