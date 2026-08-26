@@ -1,4 +1,5 @@
 import BranchlightCore
+import Foundation
 import XCTest
 
 final class PorcelainStatusParserTests: XCTestCase {
@@ -59,5 +60,177 @@ final class PorcelainStatusParserTests: XCTestCase {
         XCTAssertEqual(envelope.statusKind(forAbsolutePath: "/tmp/repo/Sources"), .modified)
         XCTAssertEqual(envelope.statusKind(forAbsolutePath: "/tmp/repo"), .modified)
         XCTAssertEqual(envelope.statusKind(forAbsolutePath: "/tmp/repo/README.md"), .untracked)
+    }
+}
+
+final class GitSafetyRuntimeIntegrationTests: XCTestCase {
+    func testRuntimeBlocksBranchSwitchDuringConflictedMerge() async throws {
+        let fixture = try makeRepositoryFixture(prefix: "BranchlightSafetyBlock")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        try runGit(["checkout", "-b", "side"], at: fixture.repository)
+        try "side\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "side"], at: fixture.repository)
+
+        try runGit(["checkout", "main"], at: fixture.repository)
+        try "main\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "main"], at: fixture.repository)
+        XCTAssertNotEqual(try runGitAllowingFailure(["merge", "side"], at: fixture.repository), 0)
+
+        let service = InProcessGitService()
+        do {
+            try await service.switchBranch(at: fixture.repository, name: "side")
+            XCTFail("Expected the runtime safety gate to block branch switching during a conflicted merge.")
+        } catch let error as GitMutationAdmissionError {
+            switch error {
+            case .blocked(let report):
+                XCTAssertFalse(report.canProceed)
+                XCTAssertTrue(report.signals.contains(.operationInProgress))
+                XCTAssertTrue(report.signals.contains(.conflicts))
+                XCTAssertEqual(report.intent, .switchBranch)
+            case .confirmationRequired:
+                XCTFail("A conflicted merge must be blocked, not merely confirmed.")
+            }
+        }
+
+        let journal = await service.recentOperations(limit: 1)
+        XCTAssertEqual(journal.first?.descriptor?.intent, .switchBranch)
+        XCTAssertEqual(journal.first?.state, .failed)
+    }
+
+    func testCommitRecoveryCreatesValidatedRevertCommit() async throws {
+        let fixture = try makeRepositoryFixture(prefix: "BranchlightCommitRecovery")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let service = InProcessGitService()
+        try "changed by recoverable commit\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try await service.stage(at: fixture.repository, paths: ["tracked.txt"])
+        _ = try await service.commit(at: fixture.repository, message: "recoverable change", amend: false)
+
+        let sourceRecord = try XCTUnwrap(
+            await service.recentOperations(limit: 3).first(where: { $0.descriptor?.intent == .commit })
+        )
+        let createdCommit = try XCTUnwrap(sourceRecord.postCheckpoint?.headCommit)
+        let plan = GitRecoveryPlanner.plan(for: sourceRecord)
+        XCTAssertEqual(plan.inverseIntent, .revert)
+        XCTAssertEqual(plan.target, createdCommit)
+
+        let action = try await service.executeRecovery(for: sourceRecord)
+        XCTAssertEqual(action, .revertCommit(createdCommit))
+
+        let restored = try String(
+            contentsOf: fixture.repository.appendingPathComponent("tracked.txt"),
+            encoding: .utf8
+        )
+        XCTAssertEqual(restored, "base\n")
+
+        let history = try await service.history(at: fixture.repository, limit: 2)
+        XCTAssertEqual(history.count, 2)
+        XCTAssertNotEqual(history[0].hash, createdCommit)
+        XCTAssertTrue(history[0].subject.localizedCaseInsensitiveContains("revert"))
+
+        let recoveryRecord = try XCTUnwrap(
+            await service.recentOperations(limit: 3).first(where: {
+                $0.descriptor?.parameters["recoveryOf"] == sourceRecord.id.uuidString
+            })
+        )
+        XCTAssertEqual(recoveryRecord.descriptor?.intent, .revert)
+        XCTAssertEqual(recoveryRecord.state, .succeeded)
+        XCTAssertEqual(recoveryRecord.preCheckpoint?.headCommit, createdCommit)
+        XCTAssertNotEqual(recoveryRecord.postCheckpoint?.headCommit, createdCommit)
+    }
+
+    func testRecoveryIsRejectedAfterRepositoryMovesPastCheckpoint() async throws {
+        let fixture = try makeRepositoryFixture(prefix: "BranchlightRecoveryMismatch")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let service = InProcessGitService()
+        try "first change\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try await service.stage(at: fixture.repository, paths: ["tracked.txt"])
+        _ = try await service.commit(at: fixture.repository, message: "first recoverable", amend: false)
+        let sourceRecord = try XCTUnwrap(
+            await service.recentOperations(limit: 3).first(where: { $0.descriptor?.intent == .commit })
+        )
+
+        try "later\n".write(
+            to: fixture.repository.appendingPathComponent("later.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try await service.stage(at: fixture.repository, paths: ["later.txt"])
+        _ = try await service.commit(at: fixture.repository, message: "later commit", amend: false)
+
+        do {
+            _ = try await service.executeRecovery(for: sourceRecord)
+            XCTFail("Expected recovery to reject a repository that moved beyond the source checkpoint.")
+        } catch let error as GitRecoveryValidationError {
+            switch error {
+            case .rejected(let issues):
+                XCTAssertTrue(issues.contains(.headChanged))
+            }
+        }
+    }
+
+    private func makeRepositoryFixture(prefix: String) throws -> (root: URL, repository: URL) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
+        let repository = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try runGit(["init", "-b", "main"], at: repository)
+        try runGit(["config", "user.email", "branchlight-safety@example.invalid"], at: repository)
+        try runGit(["config", "user.name", "Branchlight Safety Tests"], at: repository)
+        try "base\n".write(
+            to: repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: repository)
+        try runGit(["commit", "-m", "initial"], at: repository)
+        return (root, repository)
+    }
+
+    private func runGit(_ arguments: [String], at directory: URL) throws {
+        let status = try runGitAllowingFailure(arguments, at: directory)
+        guard status == 0 else {
+            throw NSError(
+                domain: "GitSafetyRuntimeIntegrationTests.Git",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed"]
+            )
+        }
+    }
+
+    private func runGitAllowingFailure(_ arguments: [String], at directory: URL) throws -> Int32 {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", directory.path] + arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+        try process.run()
+        _ = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return process.terminationStatus
     }
 }
