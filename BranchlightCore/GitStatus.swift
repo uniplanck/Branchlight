@@ -311,3 +311,144 @@ public extension GitService {
         }
     }
 }
+
+public struct GitConflictFile: Hashable, Identifiable, Sendable {
+    public let path: String
+    public let base: String?
+    public let ours: String?
+    public let theirs: String?
+    public let result: String?
+
+    public var id: String { path }
+
+    public init(path: String, base: String?, ours: String?, theirs: String?, result: String?) {
+        self.path = path
+        self.base = base
+        self.ours = ours
+        self.theirs = theirs
+        self.result = result
+    }
+}
+
+public enum GitConflictWorkspaceError: LocalizedError, Sendable {
+    case notConflicted(String)
+    case invalidPath(String)
+    case unsupportedBinary(String)
+    case fileTooLarge(String)
+    case unreadableResult(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .notConflicted(let path):
+            return "\(path) is not an active conflicted path."
+        case .invalidPath(let path):
+            return "The conflict path is outside the repository: \(path)."
+        case .unsupportedBinary(let path):
+            return "Binary conflict resolution is not supported for \(path)."
+        case .fileTooLarge(let path):
+            return "\(path) is too large for the text conflict workspace."
+        case .unreadableResult(let path):
+            return "The working-tree result for \(path) could not be read as UTF-8 text."
+        }
+    }
+}
+
+public extension SystemGitEngine {
+    func conflictFile(
+        at repositoryURL: URL,
+        path: String,
+        maximumBytes: Int = 2 * 1024 * 1024
+    ) throws -> GitConflictFile {
+        let root = try repositoryRoot(for: repositoryURL).standardizedFileURL
+        let snapshot = try status(at: root)
+        guard snapshot.paths.contains(where: { $0.path == path && $0.kind == .conflicted }) else {
+            throw GitConflictWorkspaceError.notConflicted(path)
+        }
+
+        let resultURL = try validatedConflictPath(path, root: root)
+        let base = try conflictStageText(stage: 1, path: path, root: root, maximumBytes: maximumBytes)
+        let ours = try conflictStageText(stage: 2, path: path, root: root, maximumBytes: maximumBytes)
+        let theirs = try conflictStageText(stage: 3, path: path, root: root, maximumBytes: maximumBytes)
+
+        let result: String?
+        if FileManager.default.fileExists(atPath: resultURL.path) {
+            let data = try Data(contentsOf: resultURL, options: [.mappedIfSafe])
+            try validateConflictTextData(data, path: path, maximumBytes: maximumBytes)
+            guard let decoded = String(data: data, encoding: .utf8) else {
+                throw GitConflictWorkspaceError.unreadableResult(path)
+            }
+            result = decoded
+        } else {
+            result = nil
+        }
+
+        return GitConflictFile(path: path, base: base, ours: ours, theirs: theirs, result: result)
+    }
+
+    private func validatedConflictPath(_ path: String, root: URL) throws -> URL {
+        guard !path.isEmpty, path != ".", !path.hasPrefix("/"), !path.contains("\0") else {
+            throw GitConflictWorkspaceError.invalidPath(path)
+        }
+        let candidate = root.appendingPathComponent(path, isDirectory: false).standardizedFileURL
+        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        guard candidate.path.hasPrefix(rootPath) else {
+            throw GitConflictWorkspaceError.invalidPath(path)
+        }
+        return candidate
+    }
+
+    private func conflictStageText(
+        stage: Int,
+        path: String,
+        root: URL,
+        maximumBytes: Int
+    ) throws -> String? {
+        let result = try runConflictGit(
+            ["-C", root.path, "show", ":\(stage):\(path)"]
+        )
+        if result.status != 0 {
+            return nil
+        }
+        try validateConflictTextData(result.stdout, path: path, maximumBytes: maximumBytes)
+        guard let text = String(data: result.stdout, encoding: .utf8) else {
+            throw GitConflictWorkspaceError.unsupportedBinary(path)
+        }
+        return text
+    }
+
+    private func validateConflictTextData(_ data: Data, path: String, maximumBytes: Int) throws {
+        let boundedMaximum = max(1, maximumBytes)
+        guard data.count <= boundedMaximum else {
+            throw GitConflictWorkspaceError.fileTooLarge(path)
+        }
+        guard !data.contains(0) else {
+            throw GitConflictWorkspaceError.unsupportedBinary(path)
+        }
+    }
+
+    private func runConflictGit(_ arguments: [String]) throws -> (status: Int32, stdout: Data, stderr: String) {
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            throw GitEngineError.executableMissing(executableURL.path)
+        }
+
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+
+        try process.run()
+        let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        return (
+            process.terminationStatus,
+            stdout,
+            String(data: stderrData, encoding: .utf8) ?? ""
+        )
+    }
+}
