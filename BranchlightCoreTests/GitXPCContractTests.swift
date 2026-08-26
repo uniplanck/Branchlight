@@ -75,6 +75,65 @@ final class GitXPCContractTests: XCTestCase {
         XCTAssertEqual(decoded.protocolVersion, BranchlightGitXPCContract.protocolVersion)
     }
 
+    func testEveryMutationPayloadRoundTrips() throws {
+        let mutations: [GitXPCMutation] = [
+            .stage(paths: ["a.txt"]),
+            .unstage(paths: ["a.txt"]),
+            .applyPatch(patch: "diff --git a/a.txt b/a.txt\n", reverse: false),
+            .commit(message: "test", amend: false),
+            .fetch,
+            .pullFastForwardOnly,
+            .push,
+            .switchBranch(name: "feature/xpc"),
+            .merge(branch: "feature/xpc", confirmationProvided: true),
+            .continueMerge,
+            .abortMerge,
+            .rebase(onto: "main", confirmationProvided: true),
+            .continueRebase,
+            .abortRebase,
+            .skipRebase,
+            .createStash(message: "checkpoint", includeUntracked: true),
+            .applyStash(reference: "stash@{0}", pop: false),
+            .dropStash(reference: "stash@{0}"),
+            .addWorktree(path: "/tmp/worktree", branch: "feature/xpc"),
+            .addWorktreeWithNewBranch(path: "/tmp/worktree-2", newBranch: "feature/new", startPoint: "HEAD"),
+            .removeWorktree(path: "/tmp/worktree"),
+            .cherryPick(commitHash: String(repeating: "a", count: 40), confirmationProvided: true),
+            .continueCherryPick,
+            .abortCherryPick,
+            .revert(commitHash: String(repeating: "b", count: 40), confirmationProvided: true),
+            .continueRevert,
+            .abortRevert
+        ]
+
+        for (index, mutation) in mutations.enumerated() {
+            let request = GitXPCMutationRequest(
+                requestID: UUID(),
+                repositoryPath: "/tmp/repo-\(index)",
+                mutation: mutation
+            )
+            let decoded = try GitXPCCodec.decode(
+                GitXPCMutationRequest.self,
+                from: GitXPCCodec.encode(request)
+            )
+            XCTAssertEqual(decoded, request, "Mutation payload failed at index \(index)")
+        }
+    }
+
+    func testMutationResponsePreservesRequestIdentityAndOutput() throws {
+        let requestID = UUID()
+        let response = GitXPCMutationResponse(
+            requestID: requestID,
+            output: GitXPCCommandOutput(stdout: "done", stderr: "")
+        )
+        let decoded = try GitXPCCodec.decode(
+            GitXPCMutationResponse.self,
+            from: GitXPCCodec.encode(response)
+        )
+        XCTAssertEqual(decoded, response)
+        XCTAssertEqual(decoded.requestID, requestID)
+    }
+
     func testProtocolVersionMismatchFailsClosed() {
         XCTAssertThrowsError(
             try GitXPCCodec.validateProtocolVersion(
