@@ -115,6 +115,41 @@ jobs:
           print("Finder subprocess/network/credential boundary and Core Keychain boundary verified")
           PY
 
+      - name: Verify release configuration source of truth
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import sys
+
+          project = Path("project.yml").read_text()
+          required = [
+              "CODE_SIGN_ENTITLEMENTS: BranchlightHost/BranchlightHost.entitlements",
+              "CODE_SIGN_ENTITLEMENTS: BranchlightFinderExtension/BranchlightFinderExtension.entitlements",
+          ]
+          for needle in required:
+              if needle not in project:
+                  print(f"Missing release configuration invariant: {needle}")
+                  sys.exit(1)
+
+          if project.count("ENABLE_HARDENED_RUNTIME: YES") < 2:
+              print("Host and Finder Extension must both enable Hardened Runtime in project.yml")
+              sys.exit(1)
+
+          release_script = Path("scripts/build-release.sh").read_text()
+          for needle in [
+              "ENABLE_HARDENED_RUNTIME=YES",
+              "codesign --verify --deep --strict",
+              "xcrun notarytool submit",
+              "xcrun stapler staple",
+              "shasum -a 256",
+          ]:
+              if needle not in release_script:
+                  print(f"Release script lost required safety step: {needle}")
+                  sys.exit(1)
+
+          print("Release SoT and signed/notarized pipeline invariants verified")
+          PY
+
       - name: Test Branchlight
         run: |
           xcodebuild \
@@ -126,42 +161,5 @@ jobs:
             COMPILER_INDEX_STORE_ENABLE=NO \
             test
 
-      - name: Build optimized Release product
-        run: |
-          xcodebuild \
-            -project Branchlight.xcodeproj \
-            -scheme Branchlight \
-            -configuration Release \
-            -destination 'platform=macOS' \
-            -derivedDataPath "$RUNNER_TEMP/BranchlightRelease" \
-            CODE_SIGNING_ALLOWED=NO \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            build
-
-      - name: Verify Release bundle structure and metadata
-        run: |
-          set -euo pipefail
-          APP="$RUNNER_TEMP/BranchlightRelease/Build/Products/Release/Branchlight.app"
-          EXTENSION="$APP/Contents/PlugIns/BranchlightFinderExtension.appex"
-          FRAMEWORK="$APP/Contents/Frameworks/BranchlightCore.framework"
-
-          test -d "$APP"
-          test -x "$APP/Contents/MacOS/Branchlight"
-          test -d "$EXTENSION"
-          test -x "$EXTENSION/Contents/MacOS/BranchlightFinderExtension"
-          test -d "$FRAMEWORK"
-          test -f "$FRAMEWORK/BranchlightCore"
-
-          HOST_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
-          HOST_BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")
-          EXT_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$EXTENSION/Contents/Info.plist")
-          EXT_BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$EXTENSION/Contents/Info.plist")
-          EXT_POINT=$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXTENSION/Contents/Info.plist")
-
-          test "$HOST_VERSION" = "$EXT_VERSION"
-          test "$HOST_BUILD" = "$EXT_BUILD"
-          test "$EXT_POINT" = 'com.apple.FinderSync'
-          test "$HOST_VERSION" = '0.1.0'
-          test "$HOST_BUILD" = '1'
-
-          echo "Release bundle verified: Branchlight $HOST_VERSION ($HOST_BUILD) + Finder Sync extension"
+      - name: Verify canonical unsigned Release pipeline
+        run: bash scripts/build-release.sh --unsigned
