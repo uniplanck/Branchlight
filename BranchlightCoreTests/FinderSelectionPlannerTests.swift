@@ -64,11 +64,7 @@ final class FinderSelectionPlannerTests: XCTestCase {
 final class GitRuntimeFoundationTests: XCTestCase {
     func testCoordinatorSerializesOperationsForSameRepository() async throws {
         let coordinator = GitOperationCoordinator()
-        let identity = GitRepositoryIdentity(
-            workingTreeRoot: "/tmp/repository",
-            gitDirectory: "/tmp/repository/.git",
-            commonGitDirectory: "/tmp/repository/.git"
-        )
+        let identity = makeIdentity()
         let firstEntered = RuntimeSignal()
         let releaseFirst = RuntimeSignal()
         let secondEntered = RuntimeSignal()
@@ -104,6 +100,48 @@ final class GitRuntimeFoundationTests: XCTestCase {
         let records = await coordinator.recentOperations(limit: 2)
         XCTAssertEqual(records.map(\.label), ["second", "first"])
         XCTAssertTrue(records.allSatisfy { $0.state == .succeeded && $0.finishedAt != nil })
+    }
+
+    func testCancelledQueuedOperationNeverEntersMutationBody() async throws {
+        let coordinator = GitOperationCoordinator()
+        let identity = makeIdentity()
+        let firstEntered = RuntimeSignal()
+        let releaseFirst = RuntimeSignal()
+        let cancelledBodyEntered = RuntimeSignal()
+
+        let first = Task {
+            try await coordinator.run(repository: identity, label: "blocking") {
+                await firstEntered.signal()
+                await releaseFirst.wait()
+                return "blocking"
+            }
+        }
+        await firstEntered.wait()
+
+        let cancelled = Task {
+            try await coordinator.run(repository: identity, label: "cancelled") {
+                await cancelledBodyEntered.signal()
+                return "must-not-run"
+            }
+        }
+
+        while await coordinator.queuedOperationCount(for: identity.coordinationKey) == 0 {
+            await Task.yield()
+        }
+        cancelled.cancel()
+        await releaseFirst.signal()
+        _ = try await first.value
+
+        do {
+            _ = try await cancelled.value
+            XCTFail("Expected queued operation cancellation.")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        XCTAssertFalse(await cancelledBodyEntered.isSignaled)
+        let records = await coordinator.recentOperations(limit: 2)
+        XCTAssertEqual(records.first(where: { $0.label == "cancelled" })?.state, .cancelled)
     }
 
     func testLinkedWorktreesShareCoordinationKeyAndRegisterSeparately() async throws {
@@ -157,6 +195,54 @@ final class GitRuntimeFoundationTests: XCTestCase {
         XCTAssertEqual(intelligence.conflictCount, 1)
         XCTAssertTrue(intelligence.needsConflictResolution)
         XCTAssertGreaterThanOrEqual(intelligence.changedCount, 1)
+    }
+
+    func testRepositoryIntelligenceReportsAheadBehindAndDivergence() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BranchlightTrackingTests-\(UUID().uuidString)", isDirectory: true)
+        let repository = tempDirectory.appendingPathComponent("repo", isDirectory: true)
+        let remote = tempDirectory.appendingPathComponent("remote.git", isDirectory: true)
+        let peer = tempDirectory.appendingPathComponent("peer", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        try runGit(["init", "--bare", "-b", "main", remote.path], at: tempDirectory)
+        try initializeRepository(at: repository)
+        try runGit(["remote", "add", "origin", remote.path], at: repository)
+        try runGit(["push", "-u", "origin", "main"], at: repository)
+
+        let service = InProcessGitService()
+        var intelligence = try await service.repositoryIntelligence(at: repository)
+        XCTAssertEqual(intelligence.upstream, "origin/main")
+        XCTAssertEqual(intelligence.tracking, GitAheadBehind(ahead: 0, behind: 0))
+
+        try "local\n".write(to: repository.appendingPathComponent("local.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "local.txt"], at: repository)
+        try runGit(["commit", "-m", "local ahead"], at: repository)
+        intelligence = try await service.repositoryIntelligence(at: repository)
+        XCTAssertEqual(intelligence.tracking, GitAheadBehind(ahead: 1, behind: 0))
+
+        try runGit(["clone", remote.path, peer.path], at: tempDirectory)
+        try runGit(["config", "user.email", "branchlight-peer@example.invalid"], at: peer)
+        try runGit(["config", "user.name", "Branchlight Peer"], at: peer)
+        try "remote\n".write(to: peer.appendingPathComponent("remote.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "remote.txt"], at: peer)
+        try runGit(["commit", "-m", "remote ahead"], at: peer)
+        try runGit(["push", "origin", "main"], at: peer)
+        try runGit(["fetch", "origin"], at: repository)
+
+        intelligence = try await service.repositoryIntelligence(at: repository)
+        XCTAssertEqual(intelligence.tracking, GitAheadBehind(ahead: 1, behind: 1))
+        XCTAssertTrue(intelligence.hasUpstreamDivergence)
+        XCTAssertEqual(intelligence.tracking?.summary, "↑1 ↓1")
+    }
+
+    private func makeIdentity() -> GitRepositoryIdentity {
+        GitRepositoryIdentity(
+            workingTreeRoot: "/tmp/repository",
+            gitDirectory: "/tmp/repository/.git",
+            commonGitDirectory: "/tmp/repository/.git"
+        )
     }
 
     private func initializeRepository(at repository: URL) throws {
