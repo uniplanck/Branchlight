@@ -106,13 +106,7 @@ struct ContentView: View {
             Spacer()
 
             if !model.monitoredRoots.isEmpty {
-                Menu("Repositories") {
-                    ForEach(model.monitoredRoots, id: \.self) { root in
-                        Button(URL(fileURLWithPath: root).lastPathComponent) {
-                            model.openRepository(path: root)
-                        }
-                    }
-                }
+                repositoryRadarMenu
             }
 
             Button("Add Repository…") {
@@ -132,8 +126,44 @@ struct ContentView: View {
         }
     }
 
+    private var repositoryRadarMenu: some View {
+        let envelope = SharedStatusCache()?.load() ?? StatusCacheEnvelope()
+        return Menu("Radar") {
+            ForEach(model.monitoredRoots, id: \.self) { root in
+                Button(radarTitle(for: root, envelope: envelope)) {
+                    model.openRepository(path: root)
+                }
+            }
+        }
+        .help("Repository Radar")
+    }
+
+    private func radarTitle(for root: String, envelope: StatusCacheEnvelope) -> String {
+        let name = URL(fileURLWithPath: root).lastPathComponent
+        guard let intelligence = envelope.intelligence(forRepositoryRoot: root) else {
+            return name
+        }
+
+        var components = [name, intelligence.isDetachedHead ? "HEAD \(intelligence.branch)" : intelligence.branch]
+        if let tracking = intelligence.tracking {
+            components.append(tracking.summary)
+        }
+        if intelligence.operationMode != .normal {
+            components.append(shortOperationName(intelligence.operationMode))
+        }
+        if intelligence.conflictCount > 0 {
+            components.append("\(intelligence.conflictCount) conflict\(intelligence.conflictCount == 1 ? "" : "s")")
+        } else if intelligence.changedCount > 0 {
+            components.append("\(intelligence.changedCount) changed")
+        } else {
+            components.append("clean")
+        }
+        return components.joined(separator: "  •  ")
+    }
+
     private func repositoryBar(_ snapshot: GitStatusSnapshot) -> some View {
-        HStack(spacing: 14) {
+        let intelligence = SharedStatusCache()?.load().intelligence(forRepositoryRoot: snapshot.repositoryRoot)
+        return HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(URL(fileURLWithPath: snapshot.repositoryRoot).lastPathComponent)
                     .font(.headline)
@@ -147,11 +177,19 @@ struct ContentView: View {
 
             Spacer()
 
-            Label(
-                snapshot.isDetachedHead ? "Detached @ \(snapshot.branch)" : snapshot.branch,
-                systemImage: "point.3.connected.trianglepath.dotted"
-            )
-            .font(.callout.weight(.medium))
+            VStack(alignment: .trailing, spacing: 3) {
+                Label(
+                    branchTitle(snapshot: snapshot, intelligence: intelligence),
+                    systemImage: "point.3.connected.trianglepath.dotted"
+                )
+                .font(.callout.weight(.medium))
+
+                if let intelligence, intelligence.operationMode != .normal {
+                    Label(shortOperationName(intelligence.operationMode), systemImage: "arrow.triangle.2.circlepath")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(intelligence.conflictCount > 0 ? .red : .secondary)
+                }
+            }
 
             Text(snapshot.summary)
                 .font(.callout)
@@ -159,6 +197,25 @@ struct ContentView: View {
         }
         .padding(12)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func branchTitle(snapshot: GitStatusSnapshot, intelligence: GitRepositoryIntelligence?) -> String {
+        var title = snapshot.isDetachedHead ? "Detached @ \(snapshot.branch)" : snapshot.branch
+        if let tracking = intelligence?.tracking {
+            title += "  \(tracking.summary)"
+        }
+        return title
+    }
+
+    private func shortOperationName(_ mode: GitRepositoryOperationMode) -> String {
+        switch mode {
+        case .normal: return "Normal"
+        case .merging: return "Merging"
+        case .rebasing: return "Rebasing"
+        case .cherryPicking: return "Cherry-picking"
+        case .reverting: return "Reverting"
+        case .bisecting: return "Bisecting"
+        }
     }
 
     private func changesView(_ snapshot: GitStatusSnapshot) -> some View {
