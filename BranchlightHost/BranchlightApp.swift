@@ -35,7 +35,7 @@ struct BranchlightApp: App {
         }
         .windowResizability(.contentMinSize)
         .commands {
-            BranchlightCommands()
+            BranchlightCommands(model: model)
         }
 
         Window("GitHub Live", id: "github-live") {
@@ -50,6 +50,7 @@ struct BranchlightApp: App {
 
 struct BranchlightCommands: Commands {
     @Environment(\.openWindow) private var openWindow
+    @ObservedObject var model: AppModel
 
     var body: some Commands {
         CommandMenu("Branchlight") {
@@ -57,6 +58,26 @@ struct BranchlightCommands: Commands {
                 openWindow(id: "github-live")
             }
             .keyboardShortcut("g", modifiers: [.command, .shift])
+
+            Divider()
+
+            Button("Copy Agent Context") {
+                Task { @MainActor in
+                    guard let repositoryURL = model.repositoryURL else { return }
+                    do {
+                        let context = try await InProcessGitService().agentContextMarkdown(at: repositoryURL)
+                        let pasteboard = NSPasteboard.general
+                        pasteboard.clearContents()
+                        pasteboard.setString(context, forType: .string)
+                        model.errorMessage = nil
+                        model.lastOperation = "Agent context copied"
+                    } catch {
+                        model.errorMessage = "Agent context export failed: \(error.localizedDescription)"
+                    }
+                }
+            }
+            .keyboardShortcut("c", modifiers: [.command, .option])
+            .disabled(model.repositoryURL == nil)
         }
     }
 }
