@@ -127,6 +127,7 @@ public final class SharedStatusCache: @unchecked Sendable {
     private static let envelopeFilename = "status-cache-envelope-v1.json"
     private static let pendingOpenPathFilename = "pending-finder-open-path-v1.json"
     private static let pendingFinderIntentFilename = "pending-finder-intent-v1.json"
+    private static let retainedCorruptBackupCount = 3
 
     private let storageDirectoryURL: URL
     private let legacyPreferencesURL: URL?
@@ -168,7 +169,7 @@ public final class SharedStatusCache: @unchecked Sendable {
 
     public func load() -> StatusCacheEnvelope {
         withLock {
-            if let envelope: StatusCacheEnvelope = readJSON(from: envelopeURL) {
+            if let envelope: StatusCacheEnvelope = readJSONOrQuarantine(from: envelopeURL) {
                 return envelope
             }
 
@@ -197,7 +198,7 @@ public final class SharedStatusCache: @unchecked Sendable {
 
     public func consumePendingOpenPath() -> String? {
         withLock {
-            if let path: String = readJSON(from: pendingOpenPathURL) {
+            if let path: String = readJSONOrQuarantine(from: pendingOpenPathURL) {
                 try? fileManager.removeItem(at: pendingOpenPathURL)
                 return path
             }
@@ -219,7 +220,7 @@ public final class SharedStatusCache: @unchecked Sendable {
 
     public func consumePendingFinderIntent() -> FinderIntent? {
         withLock {
-            if let intent: FinderIntent = readJSON(from: pendingFinderIntentURL) {
+            if let intent: FinderIntent = readJSONOrQuarantine(from: pendingFinderIntentURL) {
                 try? fileManager.removeItem(at: pendingFinderIntentURL)
                 return intent
             }
@@ -297,7 +298,7 @@ public final class SharedStatusCache: @unchecked Sendable {
     }
 
     private func readEnvelopeUnlocked() -> StatusCacheEnvelope {
-        if let envelope: StatusCacheEnvelope = readJSON(from: envelopeURL) {
+        if let envelope: StatusCacheEnvelope = readJSONOrQuarantine(from: envelopeURL) {
             return envelope
         }
         if let legacyData = legacyData(forKey: Self.envelopeKey),
@@ -307,9 +308,47 @@ public final class SharedStatusCache: @unchecked Sendable {
         return StatusCacheEnvelope()
     }
 
-    private func readJSON<T: Decodable>(from url: URL) -> T? {
+    private func readJSONOrQuarantine<T: Decodable>(from url: URL) -> T? {
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? decoder.decode(T.self, from: data)
+        if let decoded = try? decoder.decode(T.self, from: data) {
+            return decoded
+        }
+
+        quarantineCorruptFile(at: url)
+        return nil
+    }
+
+    private func quarantineCorruptFile(at url: URL) {
+        let prefix = url.lastPathComponent + ".corrupt-"
+        let quarantineURL = storageDirectoryURL.appendingPathComponent(
+            prefix + UUID().uuidString,
+            isDirectory: false
+        )
+        guard (try? fileManager.moveItem(at: url, to: quarantineURL)) != nil else { return }
+        pruneCorruptBackups(prefix: prefix)
+    }
+
+    private func pruneCorruptBackups(prefix: String) {
+        guard let urls = try? fileManager.contentsOfDirectory(
+            at: storageDirectoryURL,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        let backups = urls
+            .filter { $0.lastPathComponent.hasPrefix(prefix) }
+            .map { url in
+                let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return (url, date)
+            }
+            .sorted { $0.1 > $1.1 }
+
+        for backup in backups.dropFirst(Self.retainedCorruptBackupCount) {
+            try? fileManager.removeItem(at: backup.0)
+        }
     }
 
     private func writeJSON<T: Encodable>(_ value: T, to url: URL) throws {
