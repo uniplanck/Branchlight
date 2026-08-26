@@ -9,14 +9,14 @@ enum HostFinderRequest: Sendable {
 
 actor HostStatusCache {
     private let cache: SharedStatusCache?
-    private let intelligenceService: any GitService
+    private let intelligenceResolver: XPCRepositoryResolver
 
     init(
         cache: SharedStatusCache? = SharedStatusCache(),
         intelligenceService: any GitService = InProcessGitService()
     ) {
         self.cache = cache
-        self.intelligenceService = intelligenceService
+        self.intelligenceResolver = XPCRepositoryResolver(fallback: intelligenceService)
     }
 
     func load() -> StatusCacheEnvelope {
@@ -26,7 +26,7 @@ actor HostStatusCache {
     func replaceSnapshot(_ snapshot: GitStatusSnapshot) async throws -> StatusCacheEnvelope? {
         guard let cache else { return nil }
         let repositoryURL = URL(fileURLWithPath: snapshot.repositoryRoot, isDirectory: true)
-        let intelligence = try await intelligenceService.repositoryIntelligence(at: repositoryURL)
+        let intelligence = try await intelligenceResolver.repositoryIntelligence(at: repositoryURL)
         return try cache.replaceRepositoryState(snapshot: snapshot, intelligence: intelligence)
     }
 }
