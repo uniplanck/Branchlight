@@ -7,7 +7,11 @@ struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedTab = 0
     @State private var branchToSwitch = ""
+    @State private var branchToMerge = ""
+    @State private var branchToRebaseOnto = ""
     @State private var showBranchConfirmation = false
+    @State private var showMergeConfirmation = false
+    @State private var showRebaseConfirmation = false
     @State private var showPullConfirmation = false
     @State private var showStashes = true
     @State private var historyMode: HistoryMode = .repository
@@ -61,6 +65,22 @@ struct ContentView: View {
             Text(model.snapshot?.isClean == false
                  ? "The working tree has changes. Git will refuse unsafe switches, but review your changes before continuing."
                  : "Switch to \(branchToSwitch)?")
+        }
+        .alert("Merge branch?", isPresented: $showMergeConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Merge") {
+                model.mergeBranch(branchToMerge)
+            }
+        } message: {
+            Text("Merge \(branchToMerge) into the current branch? If conflicts occur, Branchlight will keep the merge in progress so you can resolve or abort it safely.")
+        }
+        .alert("Rebase current branch?", isPresented: $showRebaseConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Rebase") {
+                model.rebaseCurrentBranch(onto: branchToRebaseOnto)
+            }
+        } message: {
+            Text("Rebase the current branch onto \(branchToRebaseOnto)? This rewrites the current branch's local commits and may require conflict resolution.")
         }
         .alert("Pull remote changes?", isPresented: $showPullConfirmation) {
             Button("Cancel", role: .cancel) {}
@@ -216,6 +236,15 @@ struct ContentView: View {
         case .reverting: return "Reverting"
         case .bisecting: return "Bisecting"
         }
+    }
+
+    private var currentRepositoryIntelligence: GitRepositoryIntelligence? {
+        guard let root = model.snapshot?.repositoryRoot else { return nil }
+        return SharedStatusCache()?.load().intelligence(forRepositoryRoot: root)
+    }
+
+    private var hasGitOperationInProgress: Bool {
+        currentRepositoryIntelligence?.operationMode != .normal
     }
 
     private func changesView(_ snapshot: GitStatusSnapshot) -> some View {
@@ -598,6 +627,11 @@ struct ContentView: View {
 
     private var branchesView: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let intelligence = currentRepositoryIntelligence,
+               intelligence.operationMode == .merging || intelligence.operationMode == .rebasing {
+                advancedOperationCard(intelligence)
+            }
+
             GroupBox("Branches") {
                 List(model.branches) { branch in
                     HStack(spacing: 10) {
@@ -615,11 +649,23 @@ struct ContentView: View {
                         Button("Worktree…") { model.addWorktree(for: branch) }
                             .disabled(model.isRefreshing || model.worktrees.contains { $0.branch == branch.name })
                         if !branch.isCurrent {
+                            Button("Merge…") {
+                                branchToMerge = branch.name
+                                showMergeConfirmation = true
+                            }
+                            .disabled(model.isRefreshing || hasGitOperationInProgress)
+
+                            Button("Rebase…") {
+                                branchToRebaseOnto = branch.name
+                                showRebaseConfirmation = true
+                            }
+                            .disabled(model.isRefreshing || hasGitOperationInProgress)
+
                             Button("Switch") {
                                 branchToSwitch = branch.name
                                 showBranchConfirmation = true
                             }
-                            .disabled(model.isRefreshing)
+                            .disabled(model.isRefreshing || hasGitOperationInProgress)
                         }
                     }
                     .padding(.vertical, 2)
@@ -670,6 +716,46 @@ struct ContentView: View {
             }
         }
         .padding(.top, 8)
+    }
+
+    private func advancedOperationCard(_ intelligence: GitRepositoryIntelligence) -> some View {
+        GroupBox {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Label(
+                        intelligence.operationMode == .merging ? "Merge in progress" : "Rebase in progress",
+                        systemImage: intelligence.conflictCount > 0 ? "exclamationmark.triangle.fill" : "arrow.triangle.2.circlepath"
+                    )
+                    .font(.headline)
+
+                    if intelligence.conflictCount > 0 {
+                        Text("Resolve and stage \(intelligence.conflictCount) conflict\(intelligence.conflictCount == 1 ? "" : "s") in Changes before continuing.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Conflicts are resolved. Continue or abort the operation.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer()
+
+                if intelligence.operationMode == .merging {
+                    Button("Continue") { model.continueMerge() }
+                        .disabled(model.isRefreshing || intelligence.conflictCount > 0)
+                    Button("Abort", role: .destructive) { model.abortMerge() }
+                        .disabled(model.isRefreshing)
+                } else {
+                    Button("Continue") { model.continueRebase() }
+                        .disabled(model.isRefreshing || intelligence.conflictCount > 0)
+                    Button("Skip Commit") { model.skipRebaseCommit() }
+                        .disabled(model.isRefreshing)
+                    Button("Abort", role: .destructive) { model.abortRebase() }
+                        .disabled(model.isRefreshing)
+                }
+            }
+        }
     }
 
     private func isCurrentWorktree(_ worktree: GitWorktree) -> Bool {
