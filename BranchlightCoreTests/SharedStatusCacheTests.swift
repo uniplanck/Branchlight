@@ -83,7 +83,6 @@ final class SharedStatusCacheTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
 
         cache.setPendingOpenPath("/tmp/example-repo/File.swift")
-
         XCTAssertEqual(cache.consumePendingOpenPath(), "/tmp/example-repo/File.swift")
         XCTAssertNil(cache.consumePendingOpenPath())
     }
@@ -93,12 +92,8 @@ final class SharedStatusCacheTests: XCTestCase {
         let cloudRepository = URL(fileURLWithPath: "/Users/tester/Library/CloudStorage/Dropbox/project", isDirectory: true)
         let localRepository = URL(fileURLWithPath: "/Users/tester/Projects/project", isDirectory: true)
 
-        XCTAssertNotNil(
-            FinderIntegrationCompatibility.warning(for: cloudRepository, homeDirectoryURL: home)
-        )
-        XCTAssertNil(
-            FinderIntegrationCompatibility.warning(for: localRepository, homeDirectoryURL: home)
-        )
+        XCTAssertNotNil(FinderIntegrationCompatibility.warning(for: cloudRepository, homeDirectoryURL: home))
+        XCTAssertNil(FinderIntegrationCompatibility.warning(for: localRepository, homeDirectoryURL: home))
     }
 
     func testPendingFinderIntentIsConsumedOnce() throws {
@@ -132,9 +127,7 @@ final class SharedStatusCacheTests: XCTestCase {
             monitoredRoots: ["/tmp/legacy-repo"],
             snapshots: ["/tmp/legacy-repo": snapshot]
         )
-        let legacyPlist: [String: Any] = [
-            "statusCacheEnvelopeV1": try JSONEncoder().encode(envelope)
-        ]
+        let legacyPlist: [String: Any] = ["statusCacheEnvelopeV1": try JSONEncoder().encode(envelope)]
         let plistData = try PropertyListSerialization.data(
             fromPropertyList: legacyPlist,
             format: .binary,
@@ -164,18 +157,13 @@ final class SharedStatusCacheTests: XCTestCase {
         let preferencesDirectory = root.appendingPathComponent("Preferences", isDirectory: true)
         try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: preferencesDirectory, withIntermediateDirectories: true)
-        let preferencesURL = preferencesDirectory.appendingPathComponent("legacy.plist")
-        return (cacheDirectory, preferencesURL)
+        return (cacheDirectory, preferencesDirectory.appendingPathComponent("legacy.plist"))
     }
 }
 
 final class GitSafetyPreflightTests: XCTestCase {
     func testCleanFetchIsSafeAndProceedable() {
-        let report = GitSafetyPreflight.evaluate(
-            intent: .fetch,
-            intelligence: makeIntelligence()
-        )
-
+        let report = GitSafetyPreflight.evaluate(intent: .fetch, intelligence: makeIntelligence())
         XCTAssertEqual(report.risk, .safe)
         XCTAssertTrue(report.canProceed)
         XCTAssertFalse(report.requiresConfirmation)
@@ -205,11 +193,7 @@ final class GitSafetyPreflightTests: XCTestCase {
     func testBranchSwitchIsBlockedDuringConflictedMerge() {
         let report = GitSafetyPreflight.evaluate(
             intent: .switchBranch,
-            intelligence: makeIntelligence(
-                operationMode: .merging,
-                changedCount: 1,
-                conflictCount: 1
-            )
+            intelligence: makeIntelligence(operationMode: .merging, changedCount: 1, conflictCount: 1)
         )
 
         XCTAssertFalse(report.canProceed)
@@ -263,27 +247,63 @@ final class GitSafetyPreflightTests: XCTestCase {
 }
 
 final class GitRecoveryPlannerTests: XCTestCase {
-    func testWholePathStageProducesValidationRequiredUnstageCandidate() {
+    func testWholePathStageRequiresMatchingPostCheckpoint() {
         let record = makeRecord(
-            descriptor: GitOperationDescriptor(intent: .stage, affectedPaths: ["A.swift", "B.swift"])
+            descriptor: GitOperationDescriptor(intent: .stage, affectedPaths: ["A.swift", "B.swift"]),
+            preCheckpoint: checkpoint(head: "abc", branch: "main", index: "tree-before"),
+            postCheckpoint: checkpoint(head: "abc", branch: "main", index: "tree-after")
         )
         let plan = GitRecoveryPlanner.plan(for: record)
 
         XCTAssertEqual(plan.availability, .validationRequired)
         XCTAssertEqual(plan.inverseIntent, .unstage)
         XCTAssertEqual(plan.affectedPaths, ["A.swift", "B.swift"])
-        XCTAssertTrue(plan.isRecoverableCandidate)
+        XCTAssertEqual(plan.expectedCurrentHead, "abc")
+        XCTAssertEqual(plan.expectedCurrentIndexTree, "tree-after")
     }
 
-    func testPatchStageIsUnavailableWithoutIndexCheckpoint() {
+    func testStageWithoutCheckpointIsUnavailable() {
         let record = makeRecord(
-            descriptor: GitOperationDescriptor(intent: .stage, target: "patch")
+            descriptor: GitOperationDescriptor(intent: .stage, affectedPaths: ["A.swift"])
+        )
+        XCTAssertEqual(GitRecoveryPlanner.plan(for: record).availability, .unavailable)
+    }
+
+    func testPatchStageIsUnavailableEvenWithCheckpoint() {
+        let record = makeRecord(
+            descriptor: GitOperationDescriptor(intent: .stage, target: "patch"),
+            preCheckpoint: checkpoint(head: "abc", branch: "main", index: "before"),
+            postCheckpoint: checkpoint(head: "abc", branch: "main", index: "after")
+        )
+        XCTAssertEqual(GitRecoveryPlanner.plan(for: record).availability, .unavailable)
+    }
+
+    func testBranchSwitchCanReturnToCheckpointedPreviousBranchAfterValidation() {
+        let record = makeRecord(
+            descriptor: GitOperationDescriptor(intent: .switchBranch, target: "feature"),
+            preCheckpoint: checkpoint(head: "aaa", branch: "main", index: "tree"),
+            postCheckpoint: checkpoint(head: "bbb", branch: "feature", index: "tree")
         )
         let plan = GitRecoveryPlanner.plan(for: record)
 
-        XCTAssertEqual(plan.availability, .unavailable)
-        XCTAssertNil(plan.inverseIntent)
-        XCTAssertFalse(plan.isRecoverableCandidate)
+        XCTAssertEqual(plan.availability, .validationRequired)
+        XCTAssertEqual(plan.inverseIntent, .switchBranch)
+        XCTAssertEqual(plan.target, "main")
+        XCTAssertEqual(plan.expectedCurrentHead, "bbb")
+    }
+
+    func testCommitRecoveryUsesRevertNotHistoryRewrite() {
+        let record = makeRecord(
+            descriptor: GitOperationDescriptor(intent: .commit),
+            preCheckpoint: checkpoint(head: "before", branch: "main", index: "tree-before"),
+            postCheckpoint: checkpoint(head: "created", branch: "main", index: "tree-after")
+        )
+        let plan = GitRecoveryPlanner.plan(for: record)
+
+        XCTAssertEqual(plan.availability, .validationRequired)
+        XCTAssertEqual(plan.inverseIntent, .revert)
+        XCTAssertEqual(plan.target, "created")
+        XCTAssertEqual(plan.expectedCurrentHead, "created")
     }
 
     func testWorktreeCreationProducesValidatedRemovalCandidate() {
@@ -295,7 +315,6 @@ final class GitRecoveryPlannerTests: XCTestCase {
             )
         )
         let plan = GitRecoveryPlanner.plan(for: record)
-
         XCTAssertEqual(plan.availability, .validationRequired)
         XCTAssertEqual(plan.inverseIntent, .worktreeRemove)
         XCTAssertEqual(plan.target, "/tmp/recovery-worktree")
@@ -320,6 +339,8 @@ final class GitRecoveryPlannerTests: XCTestCase {
 
     private func makeRecord(
         descriptor: GitOperationDescriptor?,
+        preCheckpoint: GitRepositoryCheckpoint? = nil,
+        postCheckpoint: GitRepositoryCheckpoint? = nil,
         state: GitOperationState = .succeeded
     ) -> GitOperationRecord {
         GitOperationRecord(
@@ -331,10 +352,23 @@ final class GitRecoveryPlannerTests: XCTestCase {
             ),
             label: "test",
             descriptor: descriptor,
+            preCheckpoint: preCheckpoint,
+            postCheckpoint: postCheckpoint,
             state: state,
             startedAt: Date(timeIntervalSince1970: 1),
             finishedAt: Date(timeIntervalSince1970: 2),
             errorDescription: state == .failed ? "failed" : nil
+        )
+    }
+
+    private func checkpoint(head: String, branch: String, index: String) -> GitRepositoryCheckpoint {
+        GitRepositoryCheckpoint(
+            headCommit: head,
+            branch: branch,
+            isDetachedHead: false,
+            indexTree: index,
+            operationMode: .normal,
+            capturedAt: Date(timeIntervalSince1970: 1)
         )
     }
 }
