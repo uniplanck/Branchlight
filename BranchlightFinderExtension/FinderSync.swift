@@ -27,6 +27,19 @@ final class FinderSync: FIFinderSync {
             nil,
             .deliverImmediately
         )
+        let workspaceNotifications = NSWorkspace.shared.notificationCenter
+        workspaceNotifications.addObserver(
+            self,
+            selector: #selector(workspaceDidResume(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        workspaceNotifications.addObserver(
+            self,
+            selector: #selector(workspaceDidResume(_:)),
+            name: NSWorkspace.sessionDidBecomeActiveNotification,
+            object: nil
+        )
     }
 
     deinit {
@@ -36,6 +49,7 @@ final class FinderSync: FIFinderSync {
             SharedStatusNotifications.cacheChanged,
             nil
         )
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     override func requestBadgeIdentifier(for url: URL) {
@@ -157,6 +171,10 @@ final class FinderSync: FIFinderSync {
 
     @objc private func openBranchlight(_ sender: Any?) {
         openContainingApp()
+    }
+
+    @objc private func workspaceDidResume(_ notification: Notification) {
+        reloadMonitoredRoots()
     }
 
     fileprivate func reloadMonitoredRoots() {
