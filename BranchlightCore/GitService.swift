@@ -267,29 +267,7 @@ public struct InProcessGitService: GitService, Sendable {
         let identity = try await repositoryIdentity(at: repositoryURL)
         let engine = engine
         return try await detached {
-            let snapshot = try engine.status(at: identity.repositoryURL)
-            let branches = try engine.branches(at: identity.repositoryURL)
-            let upstream = branches.first(where: { $0.isCurrent })?.upstream
-            let operationMode = Self.detectOperationMode(identity: identity)
-            let tracking = try Self.detectAheadBehind(
-                executableURL: engine.executableURL,
-                identity: identity,
-                upstream: upstream
-            )
-
-            return GitRepositoryIntelligence(
-                identity: identity,
-                branch: snapshot.branch,
-                upstream: upstream,
-                tracking: tracking,
-                isDetachedHead: snapshot.isDetachedHead,
-                operationMode: operationMode,
-                changedCount: snapshot.paths.count,
-                stagedCount: snapshot.paths.count(where: { $0.isStaged }),
-                untrackedCount: snapshot.paths.count(where: { $0.kind == .untracked }),
-                conflictCount: snapshot.paths.count(where: { $0.kind == .conflicted }),
-                capturedAt: snapshot.capturedAt
-            )
+            try Self.captureIntelligence(engine: engine, identity: identity)
         }
     }
 
@@ -532,6 +510,95 @@ public struct InProcessGitService: GitService, Sendable {
         await coordinator.recentOperations(limit: limit)
     }
 
+    public func executeRecovery(for record: GitOperationRecord) async throws -> GitRecoveryAction {
+        let plan = GitRecoveryPlanner.plan(for: record)
+        guard plan.availability == .validationRequired,
+              let inverseIntent = plan.inverseIntent else {
+            throw GitRecoveryValidationError.rejected([.unavailablePlan])
+        }
+        if record.descriptor?.target == "amend" || record.descriptor?.parameters["amend"] == "true" {
+            throw GitEngineError.invalidInput("Automatic recovery for an amended commit is intentionally disabled.")
+        }
+
+        let identity = try await repositoryIdentity(at: record.repository.repositoryURL)
+        guard identity.coordinationKey == record.repository.coordinationKey else {
+            throw GitEngineError.invalidInput("The repository identity changed after the source operation; recovery was refused.")
+        }
+
+        let engine = engine
+        let checkpointProvider: @Sendable () async -> GitRepositoryCheckpoint? = {
+            await Task.detached(priority: .utility) {
+                try? Self.captureCheckpoint(executableURL: engine.executableURL, identity: identity)
+            }.value
+        }
+        let recoveryDescriptor = GitOperationDescriptor(
+            intent: inverseIntent,
+            affectedPaths: plan.affectedPaths,
+            reference: record.id.uuidString,
+            target: plan.target,
+            parameters: ["recoveryOf": record.id.uuidString]
+        )
+
+        return try await coordinator.run(
+            repository: identity,
+            label: "recover \(record.label)",
+            descriptor: recoveryDescriptor,
+            checkpointProvider: checkpointProvider
+        ) {
+            try await Task.detached(priority: .userInitiated) {
+                let currentCheckpoint = try Self.captureCheckpoint(
+                    executableURL: engine.executableURL,
+                    identity: identity
+                )
+                let currentStatus = try engine.status(at: identity.repositoryURL)
+                let action = try GitRecoveryValidator.validatedAction(
+                    plan: plan,
+                    sourceRecord: record,
+                    currentCheckpoint: currentCheckpoint,
+                    currentStatus: currentStatus
+                )
+
+                switch action {
+                case .switchBranch(let branch):
+                    try engine.switchBranch(at: identity.repositoryURL, name: branch)
+
+                case .revertCommit(let commit):
+                    let arguments = ["-C", identity.workingTreeRoot, "revert", "--no-edit", commit]
+                    let result = try Self.runGitAllowingFailure(
+                        executableURL: engine.executableURL,
+                        arguments: arguments
+                    )
+                    guard result.status == 0 else {
+                        throw GitEngineError.commandFailed(
+                            arguments: arguments,
+                            status: result.status,
+                            stderr: result.stderr
+                        )
+                    }
+
+                case .removeWorktree(let path):
+                    let targetURL = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+                    let registered = try engine.worktrees(at: identity.repositoryURL).first {
+                        URL(fileURLWithPath: $0.path, isDirectory: true).standardizedFileURL.path == targetURL.path
+                    }
+                    guard let registered else {
+                        throw GitEngineError.invalidInput("The recovery worktree is no longer registered.")
+                    }
+                    guard !registered.isLocked else {
+                        throw GitEngineError.invalidInput("The recovery worktree is locked and cannot be removed safely.")
+                    }
+                    let targetStatus = try engine.status(at: targetURL)
+                    guard targetStatus.isClean else {
+                        throw GitRecoveryValidationError.rejected([.workingTreeNotClean])
+                    }
+                    _ = try engine.removeWorktree(at: identity.repositoryURL, path: targetURL)
+                }
+
+                return action
+            }.value
+        }
+    }
+
     private func mutate<T: Sendable>(
         at repositoryURL: URL,
         label: String,
@@ -552,7 +619,12 @@ public struct InProcessGitService: GitService, Sendable {
             checkpointProvider: checkpointProvider
         ) {
             try await Task.detached(priority: .userInitiated) {
-                try operation(engine, identity.repositoryURL)
+                let intelligence = try Self.captureIntelligence(engine: engine, identity: identity)
+                let report = GitSafetyPreflight.evaluate(intent: descriptor.intent, intelligence: intelligence)
+                guard report.canProceed else {
+                    throw GitMutationAdmissionError.blocked(report)
+                }
+                return try operation(engine, identity.repositoryURL)
             }.value
         }
     }
@@ -602,6 +674,35 @@ public struct InProcessGitService: GitService, Sendable {
             workingTreeRoot: root.path,
             gitDirectory: gitDirectory.path,
             commonGitDirectory: commonGitDirectory.path
+        )
+    }
+
+    private static func captureIntelligence(
+        engine: SystemGitEngine,
+        identity: GitRepositoryIdentity
+    ) throws -> GitRepositoryIntelligence {
+        let snapshot = try engine.status(at: identity.repositoryURL)
+        let branches = try engine.branches(at: identity.repositoryURL)
+        let upstream = branches.first(where: { $0.isCurrent })?.upstream
+        let operationMode = detectOperationMode(identity: identity)
+        let tracking = try detectAheadBehind(
+            executableURL: engine.executableURL,
+            identity: identity,
+            upstream: upstream
+        )
+
+        return GitRepositoryIntelligence(
+            identity: identity,
+            branch: snapshot.branch,
+            upstream: upstream,
+            tracking: tracking,
+            isDetachedHead: snapshot.isDetachedHead,
+            operationMode: operationMode,
+            changedCount: snapshot.paths.count,
+            stagedCount: snapshot.paths.count(where: { $0.isStaged }),
+            untrackedCount: snapshot.paths.count(where: { $0.kind == .untracked }),
+            conflictCount: snapshot.paths.count(where: { $0.kind == .conflicted }),
+            capturedAt: snapshot.capturedAt
         )
     }
 
