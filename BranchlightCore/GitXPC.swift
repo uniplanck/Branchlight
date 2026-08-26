@@ -19,6 +19,10 @@ public enum BranchlightGitXPCContract {
         _ requestData: Data,
         withReply reply: @escaping (Data?, NSError?) -> Void
     )
+    func repositoryIntelligence(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?, NSError?) -> Void
+    )
 }
 
 public struct GitXPCRepositoryIdentityRequest: Codable, Hashable, Sendable {
@@ -50,6 +54,38 @@ public struct GitXPCRepositoryIdentityResponse: Codable, Hashable, Sendable {
         self.protocolVersion = protocolVersion
         self.requestID = requestID
         self.identity = identity
+    }
+}
+
+public struct GitXPCRepositoryIntelligenceRequest: Codable, Hashable, Sendable {
+    public let protocolVersion: Int
+    public let requestID: UUID
+    public let repositoryPath: String
+
+    public init(
+        protocolVersion: Int = BranchlightGitXPCContract.protocolVersion,
+        requestID: UUID = UUID(),
+        repositoryPath: String
+    ) {
+        self.protocolVersion = protocolVersion
+        self.requestID = requestID
+        self.repositoryPath = repositoryPath
+    }
+}
+
+public struct GitXPCRepositoryIntelligenceResponse: Codable, Hashable, Sendable {
+    public let protocolVersion: Int
+    public let requestID: UUID
+    public let intelligence: GitRepositoryIntelligence
+
+    public init(
+        protocolVersion: Int = BranchlightGitXPCContract.protocolVersion,
+        requestID: UUID,
+        intelligence: GitRepositoryIntelligence
+    ) {
+        self.protocolVersion = protocolVersion
+        self.requestID = requestID
+        self.intelligence = intelligence
     }
 }
 
