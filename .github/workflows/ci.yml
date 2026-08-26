@@ -12,7 +12,7 @@ jobs:
   test:
     name: Build & Test
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -125,3 +125,43 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             COMPILER_INDEX_STORE_ENABLE=NO \
             test
+
+      - name: Build optimized Release product
+        run: |
+          xcodebuild \
+            -project Branchlight.xcodeproj \
+            -scheme Branchlight \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/BranchlightRelease" \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build
+
+      - name: Verify Release bundle structure and metadata
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/BranchlightRelease/Build/Products/Release/Branchlight.app"
+          EXTENSION="$APP/Contents/PlugIns/BranchlightFinderExtension.appex"
+          FRAMEWORK="$APP/Contents/Frameworks/BranchlightCore.framework"
+
+          test -d "$APP"
+          test -x "$APP/Contents/MacOS/Branchlight"
+          test -d "$EXTENSION"
+          test -x "$EXTENSION/Contents/MacOS/BranchlightFinderExtension"
+          test -d "$FRAMEWORK"
+          test -f "$FRAMEWORK/BranchlightCore"
+
+          HOST_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
+          HOST_BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")
+          EXT_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$EXTENSION/Contents/Info.plist")
+          EXT_BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$EXTENSION/Contents/Info.plist")
+          EXT_POINT=$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXTENSION/Contents/Info.plist")
+
+          test "$HOST_VERSION" = "$EXT_VERSION"
+          test "$HOST_BUILD" = "$EXT_BUILD"
+          test "$EXT_POINT" = 'com.apple.FinderSync'
+          test "$HOST_VERSION" = '0.1.0'
+          test "$HOST_BUILD" = '1'
+
+          echo "Release bundle verified: Branchlight $HOST_VERSION ($HOST_BUILD) + Finder Sync extension"
