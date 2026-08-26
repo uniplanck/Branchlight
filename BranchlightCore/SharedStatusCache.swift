@@ -31,17 +31,28 @@ public struct StatusCacheEnvelope: Codable, Sendable {
     public var revision: Int
     public var monitoredRoots: [String]
     public var snapshots: [String: GitStatusSnapshot]
+    public var repositoryIntelligence: [String: GitRepositoryIntelligence]?
 
-    public init(revision: Int = 0, monitoredRoots: [String] = [], snapshots: [String: GitStatusSnapshot] = [:]) {
+    public init(
+        revision: Int = 0,
+        monitoredRoots: [String] = [],
+        snapshots: [String: GitStatusSnapshot] = [:],
+        repositoryIntelligence: [String: GitRepositoryIntelligence]? = nil
+    ) {
         self.revision = revision
         self.monitoredRoots = monitoredRoots
         self.snapshots = snapshots
+        self.repositoryIntelligence = repositoryIntelligence
     }
 
     public func snapshot(containing absolutePath: String) -> GitStatusSnapshot? {
         snapshots.values
             .filter { absolutePath == $0.repositoryRoot || absolutePath.hasPrefix($0.repositoryRoot + "/") }
             .max { $0.repositoryRoot.count < $1.repositoryRoot.count }
+    }
+
+    public func intelligence(forRepositoryRoot repositoryRoot: String) -> GitRepositoryIntelligence? {
+        repositoryIntelligence?[repositoryRoot]
     }
 
     public func statusKind(forAbsolutePath absolutePath: String) -> GitStatusKind {
@@ -228,6 +239,28 @@ public final class SharedStatusCache: @unchecked Sendable {
             var envelope = readEnvelopeUnlocked()
             envelope.revision += 1
             envelope.snapshots[snapshot.repositoryRoot] = snapshot
+            if !envelope.monitoredRoots.contains(snapshot.repositoryRoot) {
+                envelope.monitoredRoots.append(snapshot.repositoryRoot)
+                envelope.monitoredRoots.sort()
+            }
+            try writeJSON(envelope, to: envelopeURL)
+            return envelope
+        }
+        SharedStatusNotifications.postCacheChanged()
+        return envelope
+    }
+
+    public func replaceRepositoryState(
+        snapshot: GitStatusSnapshot,
+        intelligence: GitRepositoryIntelligence
+    ) throws -> StatusCacheEnvelope {
+        let envelope = try withLock { () throws -> StatusCacheEnvelope in
+            var envelope = readEnvelopeUnlocked()
+            envelope.revision += 1
+            envelope.snapshots[snapshot.repositoryRoot] = snapshot
+            var intelligenceByRoot = envelope.repositoryIntelligence ?? [:]
+            intelligenceByRoot[snapshot.repositoryRoot] = intelligence
+            envelope.repositoryIntelligence = intelligenceByRoot
             if !envelope.monitoredRoots.contains(snapshot.repositoryRoot) {
                 envelope.monitoredRoots.append(snapshot.repositoryRoot)
                 envelope.monitoredRoots.sort()
