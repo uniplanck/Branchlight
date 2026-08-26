@@ -12,6 +12,8 @@ private let branchlightCacheChangedCallback: CFNotificationCallback = { _, obser
 final class FinderSync: FIFinderSync {
     private let controller = FIFinderSyncController.default()
     private let cache = SharedStatusCache()
+    private let envelopeLock = NSLock()
+    private var cachedEnvelope = StatusCacheEnvelope()
 
     override init() {
         super.init()
@@ -37,7 +39,7 @@ final class FinderSync: FIFinderSync {
     }
 
     override func requestBadgeIdentifier(for url: URL) {
-        guard let envelope = cache?.load() else { return }
+        let envelope = currentEnvelope()
         let kind = envelope.statusKind(forAbsolutePath: url.standardizedFileURL.path)
         controller.setBadgeIdentifier(kind == .clean || kind == .ignored ? "" : kind.rawValue, for: url)
     }
@@ -53,7 +55,8 @@ final class FinderSync: FIFinderSync {
         let urls = urlsForCurrentContext()
         let menu = NSMenu(title: "Branchlight")
 
-        if !urls.isEmpty, let envelope = cache?.load() {
+        if !urls.isEmpty {
+            let envelope = currentEnvelope()
             let aggregate = GitStatusClassifier.aggregate(
                 urls.map { envelope.statusKind(forAbsolutePath: $0.standardizedFileURL.path) }
             )
@@ -157,10 +160,23 @@ final class FinderSync: FIFinderSync {
     }
 
     fileprivate func reloadMonitoredRoots() {
-        let roots = cache?.load().monitoredRoots ?? []
+        let envelope = cache?.load() ?? StatusCacheEnvelope()
+        replaceCachedEnvelope(envelope)
         controller.directoryURLs = Set(
-            roots.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }
+            envelope.monitoredRoots.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }
         )
+    }
+
+    private func replaceCachedEnvelope(_ envelope: StatusCacheEnvelope) {
+        envelopeLock.lock()
+        cachedEnvelope = envelope
+        envelopeLock.unlock()
+    }
+
+    private func currentEnvelope() -> StatusCacheEnvelope {
+        envelopeLock.lock()
+        defer { envelopeLock.unlock() }
+        return cachedEnvelope
     }
 
     private func registerBadges() {
@@ -217,8 +233,8 @@ final class FinderSync: FIFinderSync {
 
     private func enqueueFinderIntent(_ action: FinderIntentAction) {
         let urls = urlsForCurrentContext()
-        guard let envelope = cache?.load(),
-              let context = selectionPlan(for: urls, envelope: envelope) else {
+        let envelope = currentEnvelope()
+        guard let context = selectionPlan(for: urls, envelope: envelope) else {
             openContainingApp()
             return
         }
