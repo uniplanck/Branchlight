@@ -337,6 +337,114 @@ public struct GitOperationRecord: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+public enum GitRecoveryAvailability: String, Codable, CaseIterable, Hashable, Sendable {
+    case unavailable
+    case validationRequired
+}
+
+public struct GitRecoveryPlan: Codable, Hashable, Sendable {
+    public let sourceOperationID: UUID
+    public let availability: GitRecoveryAvailability
+    public let inverseIntent: GitMutationIntent?
+    public let affectedPaths: [String]
+    public let target: String?
+    public let reason: String
+
+    public init(
+        sourceOperationID: UUID,
+        availability: GitRecoveryAvailability,
+        inverseIntent: GitMutationIntent?,
+        affectedPaths: [String] = [],
+        target: String? = nil,
+        reason: String
+    ) {
+        self.sourceOperationID = sourceOperationID
+        self.availability = availability
+        self.inverseIntent = inverseIntent
+        self.affectedPaths = affectedPaths
+        self.target = target
+        self.reason = reason
+    }
+
+    public var isRecoverableCandidate: Bool { availability == .validationRequired }
+}
+
+public enum GitRecoveryPlanner {
+    public static func plan(for record: GitOperationRecord) -> GitRecoveryPlan {
+        guard record.state == .succeeded else {
+            return unavailable(record, "Only successfully completed operations can produce a recovery candidate.")
+        }
+        guard let descriptor = record.descriptor else {
+            return unavailable(record, "This journal entry predates structured recovery metadata.")
+        }
+
+        switch descriptor.intent {
+        case .stage:
+            guard descriptor.target != "patch", !descriptor.affectedPaths.isEmpty else {
+                return unavailable(record, "Patch-level staging requires an index checkpoint before it can be reversed safely.")
+            }
+            return GitRecoveryPlan(
+                sourceOperationID: record.id,
+                availability: .validationRequired,
+                inverseIntent: .unstage,
+                affectedPaths: descriptor.affectedPaths,
+                reason: "Validate the current index against a checkpoint before unstaging the recorded paths."
+            )
+        case .unstage:
+            guard descriptor.target != "patch", !descriptor.affectedPaths.isEmpty else {
+                return unavailable(record, "Patch-level unstaging requires the previous index contents to be checkpointed.")
+            }
+            return GitRecoveryPlan(
+                sourceOperationID: record.id,
+                availability: .validationRequired,
+                inverseIntent: .stage,
+                affectedPaths: descriptor.affectedPaths,
+                reason: "Restaging whole paths may not recreate a previous partial index; checkpoint validation is required."
+            )
+        case .worktreeAdd:
+            guard let target = descriptor.target, !target.isEmpty else {
+                return unavailable(record, "The created worktree path was not recorded.")
+            }
+            return GitRecoveryPlan(
+                sourceOperationID: record.id,
+                availability: .validationRequired,
+                inverseIntent: .worktreeRemove,
+                target: target,
+                reason: "Verify the worktree is still registered, clean, unlocked, and unchanged before removal."
+            )
+        case .switchBranch:
+            return unavailable(record, "The previous branch and HEAD checkpoint are not recorded yet.")
+        case .commit:
+            return unavailable(record, "The resulting commit hash is not recorded yet; automatic revert would be unsafe.")
+        case .pull:
+            return unavailable(record, "Pre-pull HEAD and index checkpoints are required before rollback can be planned.")
+        case .push:
+            return unavailable(record, "Remote history must never be rewritten automatically as an undo operation.")
+        case .stashCreate:
+            return unavailable(record, "The created stash reference must be captured before a drop recovery can be proposed.")
+        case .stashApply:
+            return unavailable(record, "Applying or popping a stash mutates the working tree and requires a pre-apply checkpoint.")
+        case .stashDrop:
+            return unavailable(record, "Dropping a stash is destructive and has no guaranteed local inverse.")
+        case .worktreeRemove:
+            return unavailable(record, "Removed worktree contents are not guaranteed to be reconstructable from journal metadata alone.")
+        case .fetch:
+            return unavailable(record, "Fetch updates remote-tracking metadata and normally does not require an undo action.")
+        case .merge, .rebase, .cherryPick, .revert, .resetHard:
+            return unavailable(record, "This operation requires durable pre/post checkpoints before recovery can be offered.")
+        }
+    }
+
+    private static func unavailable(_ record: GitOperationRecord, _ reason: String) -> GitRecoveryPlan {
+        GitRecoveryPlan(
+            sourceOperationID: record.id,
+            availability: .unavailable,
+            inverseIntent: nil,
+            reason: reason
+        )
+    }
+}
+
 public struct GitBranch: Codable, Hashable, Identifiable, Sendable {
     public let name: String
     public let isCurrent: Bool
