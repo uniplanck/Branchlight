@@ -77,6 +77,16 @@ final class GitXPCContractTests: XCTestCase {
 
         let version: Int = try await withCheckedThrowingContinuation { continuation in
             let gate = XPCProbeContinuationGate(continuation)
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) {
+                gate.fail(
+                    NSError(
+                        domain: "BranchlightTests.XPC",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Bundled Git XPC probe timed out after 5 seconds."]
+                    )
+                )
+            }
+
             guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
                 gate.fail(error)
             }) as? BranchlightGitXPCProtocol else {
