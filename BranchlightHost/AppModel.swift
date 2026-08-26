@@ -26,6 +26,10 @@ final class AppModel: ObservableObject {
     @Published var stashIncludeUntracked = true
     @Published var newWorktreeBranch = ""
     @Published var worktreeStartPoint = "HEAD"
+    @Published var conflictFile: GitConflictFile?
+    @Published var selectedConflictPath: String?
+    @Published var conflictResult = ""
+    @Published var isLoadingConflict = false
     @Published var isRefreshing = false
     @Published var errorMessage: String?
     @Published var lastOperation: String?
@@ -68,6 +72,13 @@ final class AppModel: ObservableObject {
 
     var hasStagedChanges: Bool {
         snapshot?.paths.contains(where: { $0.isStaged }) == true
+    }
+
+    var conflictedPaths: [String] {
+        snapshot?.paths
+            .filter { $0.kind == .conflicted }
+            .map(\.path)
+            .sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) ?? []
     }
 
     var selectedFilePath: String? {
@@ -114,6 +125,7 @@ final class AppModel: ObservableObject {
         blameLines = []
         stashes = []
         worktrees = []
+        clearConflictWorkspace()
         errorMessage = nil
         startWatching(path: path)
         Task { await refresh() }
@@ -227,6 +239,10 @@ final class AppModel: ObservableObject {
                 worktrees = refreshedWorktrees
             }
             selectedPaths = selectedPaths.intersection(Set(load.snapshot.paths.map(\.path)))
+            if let selectedConflictPath,
+               !load.snapshot.paths.contains(where: { $0.path == selectedConflictPath && $0.kind == .conflicted }) {
+                clearConflictWorkspace()
+            }
             isRefreshing = false
             persistSnapshotForFinder(load.snapshot)
         } catch {
@@ -374,6 +390,57 @@ final class AppModel: ObservableObject {
         runMutation(label: "Rebase commit skipped") { service, repositoryURL in
             _ = try await service.skipRebase(at: repositoryURL)
         }
+    }
+
+    func loadConflict(path: String) {
+        guard let repositoryURL else { return }
+        isLoadingConflict = true
+        errorMessage = nil
+        Task {
+            do {
+                let loaded = try await gitService.conflictFile(at: repositoryURL, path: path)
+                conflictFile = loaded
+                selectedConflictPath = path
+                conflictResult = loaded.result ?? loaded.ours ?? loaded.theirs ?? loaded.base ?? ""
+                isLoadingConflict = false
+            } catch {
+                errorMessage = error.localizedDescription
+                isLoadingConflict = false
+            }
+        }
+    }
+
+    func useConflictBase() {
+        if let base = conflictFile?.base { conflictResult = base }
+    }
+
+    func useConflictOurs() {
+        if let ours = conflictFile?.ours { conflictResult = ours }
+    }
+
+    func useConflictTheirs() {
+        if let theirs = conflictFile?.theirs { conflictResult = theirs }
+    }
+
+    func resetConflictResult() {
+        conflictResult = conflictFile?.result ?? ""
+    }
+
+    func saveConflictResolution() {
+        guard let path = selectedConflictPath else { return }
+        let result = conflictResult
+        runMutation(label: "Resolved conflict in \(path)") { service, repositoryURL in
+            _ = try await service.resolveConflict(at: repositoryURL, path: path, result: result)
+        } onSuccess: {
+            self.clearConflictWorkspace()
+        }
+    }
+
+    private func clearConflictWorkspace() {
+        conflictFile = nil
+        selectedConflictPath = nil
+        conflictResult = ""
+        isLoadingConflict = false
     }
 
     func createStash() {
