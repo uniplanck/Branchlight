@@ -10,6 +10,11 @@ final class XPCServiceIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture) }
         try runGit(["init", "-b", "main"], at: fixture)
 
+        let nested = fixture
+            .appendingPathComponent("Sources", isDirectory: true)
+            .appendingPathComponent("Feature", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+
         let connection = NSXPCConnection(serviceName: BranchlightGitXPCContract.serviceName)
         connection.remoteObjectInterface = NSXPCInterface(with: BranchlightGitXPCProtocol.self)
         connection.resume()
@@ -19,7 +24,9 @@ final class XPCServiceIntegrationTests: XCTestCase {
         let version = try await probe(proxy)
         XCTAssertEqual(version, BranchlightGitXPCContract.protocolVersion)
 
-        let request = GitXPCRepositoryIdentityRequest(repositoryPath: fixture.standardizedFileURL.path)
+        // Resolve from a nested selection, not just the repository root. This is the
+        // exact read path used by Finder open-path requests and the Host repository picker.
+        let request = GitXPCRepositoryIdentityRequest(repositoryPath: nested.standardizedFileURL.path)
         let response = try await repositoryIdentity(proxy, request: request)
 
         XCTAssertEqual(response.protocolVersion, BranchlightGitXPCContract.protocolVersion)
