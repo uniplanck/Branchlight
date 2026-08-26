@@ -9,6 +9,9 @@ public enum FinderIntentAction: String, Codable, Sendable {
 }
 
 public struct FinderIntent: Codable, Sendable, Equatable {
+    public static let defaultMaximumAge: TimeInterval = 5 * 60
+    public static let maximumFutureClockSkew: TimeInterval = 60
+
     public let action: FinderIntentAction
     public let repositoryRoot: String
     public let paths: [String]
@@ -24,6 +27,14 @@ public struct FinderIntent: Codable, Sendable, Equatable {
         self.repositoryRoot = repositoryRoot
         self.paths = paths
         self.requestedAt = requestedAt
+    }
+
+    public func isFresh(
+        at now: Date = Date(),
+        maximumAge: TimeInterval = FinderIntent.defaultMaximumAge
+    ) -> Bool {
+        let age = now.timeIntervalSince(requestedAt)
+        return age >= -Self.maximumFutureClockSkew && age <= max(0, maximumAge)
     }
 }
 
@@ -218,11 +229,14 @@ public final class SharedStatusCache: @unchecked Sendable {
         }
     }
 
-    public func consumePendingFinderIntent() -> FinderIntent? {
+    public func consumePendingFinderIntent(
+        now: Date = Date(),
+        maximumAge: TimeInterval = FinderIntent.defaultMaximumAge
+    ) -> FinderIntent? {
         withLock {
             if let intent: FinderIntent = readJSONOrQuarantine(from: pendingFinderIntentURL) {
                 try? fileManager.removeItem(at: pendingFinderIntentURL)
-                return intent
+                return intent.isFresh(at: now, maximumAge: maximumAge) ? intent : nil
             }
 
             guard !legacyValueWasConsumed(forKey: Self.pendingFinderIntentKey),
@@ -231,7 +245,7 @@ public final class SharedStatusCache: @unchecked Sendable {
                 return nil
             }
             markLegacyValueConsumed(forKey: Self.pendingFinderIntentKey)
-            return intent
+            return intent.isFresh(at: now, maximumAge: maximumAge) ? intent : nil
         }
     }
 
