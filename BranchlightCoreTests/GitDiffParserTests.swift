@@ -95,8 +95,57 @@ final class GitConflictWorkspaceTests: XCTestCase {
     private let engine = SystemGitEngine()
 
     func testLoadsBaseOursTheirsAndWorkingResultFromActiveConflict() throws {
-        let fixture = try makeFixture(prefix: "BranchlightConflictWorkspace")
+        let fixture = try makeConflictedFixture(prefix: "BranchlightConflictWorkspace")
         defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let conflict = try engine.conflictFile(at: fixture.repository, path: "tracked.txt")
+        XCTAssertEqual(conflict.path, "tracked.txt")
+        XCTAssertEqual(conflict.base, "base\n")
+        XCTAssertEqual(conflict.ours, "ours\n")
+        XCTAssertEqual(conflict.theirs, "theirs\n")
+        XCTAssertTrue(conflict.result?.contains("<<<<<<<") == true)
+        XCTAssertTrue(conflict.result?.contains("ours") == true)
+        XCTAssertTrue(conflict.result?.contains("theirs") == true)
+    }
+
+    func testResolveConflictWritesStagesAndAllowsMergeContinue() throws {
+        let fixture = try makeConflictedFixture(prefix: "BranchlightConflictResolve")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let snapshot = try engine.resolveConflict(
+            at: fixture.repository,
+            path: "tracked.txt",
+            result: "resolved\n"
+        )
+        let tracked = try XCTUnwrap(snapshot.paths.first(where: { $0.path == "tracked.txt" }))
+        XCTAssertNotEqual(tracked.kind, .conflicted)
+        XCTAssertTrue(tracked.isStaged)
+        XCTAssertEqual(
+            try String(contentsOf: fixture.repository.appendingPathComponent("tracked.txt"), encoding: .utf8),
+            "resolved\n"
+        )
+
+        _ = try engine.continueMerge(at: fixture.repository)
+        XCTAssertTrue(try engine.status(at: fixture.repository).isClean)
+        XCTAssertEqual(
+            try String(contentsOf: fixture.repository.appendingPathComponent("tracked.txt"), encoding: .utf8),
+            "resolved\n"
+        )
+    }
+
+    func testRejectsPathThatIsNotCurrentlyConflicted() throws {
+        let fixture = try makeFixture(prefix: "BranchlightConflictReject")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertThrowsError(try engine.conflictFile(at: fixture.repository, path: "tracked.txt")) { error in
+            guard case GitConflictWorkspaceError.notConflicted("tracked.txt") = error else {
+                return XCTFail("Expected notConflicted, got \(error)")
+            }
+        }
+    }
+
+    private func makeConflictedFixture(prefix: String) throws -> (root: URL, repository: URL) {
+        let fixture = try makeFixture(prefix: prefix)
 
         try runGit(["checkout", "-b", "side"], at: fixture.repository)
         try "theirs\n".write(
@@ -116,27 +165,10 @@ final class GitConflictWorkspaceTests: XCTestCase {
         try runGit(["add", "tracked.txt"], at: fixture.repository)
         try runGit(["commit", "-m", "main change"], at: fixture.repository)
 
-        XCTAssertNotEqual(try runGitAllowingFailure(["merge", "side"], at: fixture.repository), 0)
-
-        let conflict = try engine.conflictFile(at: fixture.repository, path: "tracked.txt")
-        XCTAssertEqual(conflict.path, "tracked.txt")
-        XCTAssertEqual(conflict.base, "base\n")
-        XCTAssertEqual(conflict.ours, "ours\n")
-        XCTAssertEqual(conflict.theirs, "theirs\n")
-        XCTAssertTrue(conflict.result?.contains("<<<<<<<") == true)
-        XCTAssertTrue(conflict.result?.contains("ours") == true)
-        XCTAssertTrue(conflict.result?.contains("theirs") == true)
-    }
-
-    func testRejectsPathThatIsNotCurrentlyConflicted() throws {
-        let fixture = try makeFixture(prefix: "BranchlightConflictReject")
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-
-        XCTAssertThrowsError(try engine.conflictFile(at: fixture.repository, path: "tracked.txt")) { error in
-            guard case GitConflictWorkspaceError.notConflicted("tracked.txt") = error else {
-                return XCTFail("Expected notConflicted, got \(error)")
-            }
+        guard try runGitAllowingFailure(["merge", "side"], at: fixture.repository) != 0 else {
+            throw NSError(domain: "GitConflictWorkspaceTests.Git", code: 99)
         }
+        return fixture
     }
 
     private func makeFixture(prefix: String) throws -> (root: URL, repository: URL) {
