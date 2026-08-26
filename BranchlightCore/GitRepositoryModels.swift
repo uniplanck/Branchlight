@@ -277,6 +277,28 @@ public enum GitSafetyPreflight {
     }
 }
 
+public struct GitOperationDescriptor: Codable, Hashable, Sendable {
+    public let intent: GitMutationIntent
+    public let affectedPaths: [String]
+    public let reference: String?
+    public let target: String?
+    public let parameters: [String: String]
+
+    public init(
+        intent: GitMutationIntent,
+        affectedPaths: [String] = [],
+        reference: String? = nil,
+        target: String? = nil,
+        parameters: [String: String] = [:]
+    ) {
+        self.intent = intent
+        self.affectedPaths = affectedPaths
+        self.reference = reference
+        self.target = target
+        self.parameters = parameters
+    }
+}
+
 public enum GitOperationState: String, Codable, Hashable, Sendable {
     case running
     case succeeded
@@ -288,6 +310,7 @@ public struct GitOperationRecord: Codable, Hashable, Identifiable, Sendable {
     public let id: UUID
     public let repository: GitRepositoryIdentity
     public let label: String
+    public let descriptor: GitOperationDescriptor?
     public let state: GitOperationState
     public let startedAt: Date
     public let finishedAt: Date?
@@ -297,6 +320,7 @@ public struct GitOperationRecord: Codable, Hashable, Identifiable, Sendable {
         id: UUID,
         repository: GitRepositoryIdentity,
         label: String,
+        descriptor: GitOperationDescriptor? = nil,
         state: GitOperationState,
         startedAt: Date,
         finishedAt: Date?,
@@ -305,6 +329,7 @@ public struct GitOperationRecord: Codable, Hashable, Identifiable, Sendable {
         self.id = id
         self.repository = repository
         self.label = label
+        self.descriptor = descriptor
         self.state = state
         self.startedAt = startedAt
         self.finishedAt = finishedAt
