@@ -299,11 +299,28 @@ public struct GitOperationDescriptor: Codable, Hashable, Sendable {
     }
 }
 
+/// Exact serialized state of Git's index file. `data == nil` means the index file did
+/// not exist at the checkpoint (for example an unborn repository before its first add).
+/// Capturing raw bytes preserves partial staging and index-only flags that a tree hash
+/// cannot represent.
+public struct GitIndexSnapshot: Codable, Hashable, Sendable {
+    public let data: Data?
+    public let fileMode: Int?
+
+    public init(data: Data?, fileMode: Int?) {
+        self.data = data
+        self.fileMode = fileMode
+    }
+
+    public var isMissing: Bool { data == nil }
+}
+
 public struct GitRepositoryCheckpoint: Codable, Hashable, Sendable {
     public let headCommit: String?
     public let branch: String?
     public let isDetachedHead: Bool
     public let indexTree: String?
+    public let indexSnapshot: GitIndexSnapshot?
     public let operationMode: GitRepositoryOperationMode
     public let capturedAt: Date
 
@@ -312,6 +329,7 @@ public struct GitRepositoryCheckpoint: Codable, Hashable, Sendable {
         branch: String?,
         isDetachedHead: Bool,
         indexTree: String?,
+        indexSnapshot: GitIndexSnapshot? = nil,
         operationMode: GitRepositoryOperationMode,
         capturedAt: Date = Date()
     ) {
@@ -319,6 +337,7 @@ public struct GitRepositoryCheckpoint: Codable, Hashable, Sendable {
         self.branch = branch
         self.isDetachedHead = isDetachedHead
         self.indexTree = indexTree
+        self.indexSnapshot = indexSnapshot
         self.operationMode = operationMode
         self.capturedAt = capturedAt
     }
@@ -417,13 +436,10 @@ public enum GitRecoveryPlanner {
 
         switch descriptor.intent {
         case .stage:
-            guard descriptor.target != "patch", !descriptor.affectedPaths.isEmpty else {
-                return unavailable(record, "Patch-level staging requires a captured patch or index checkpoint before reversal.")
-            }
-            guard let preIndex = record.preCheckpoint?.indexTree,
-                  let postIndex = record.postCheckpoint?.indexTree,
+            guard let preIndex = record.preCheckpoint?.indexSnapshot,
+                  let postIndex = record.postCheckpoint?.indexSnapshot,
                   preIndex != postIndex else {
-                return unavailable(record, "A distinct pre/post index checkpoint is required before unstaging can be proposed.")
+                return unavailable(record, "Distinct exact pre/post index snapshots are required before staged state can be restored.")
             }
             return GitRecoveryPlan(
                 sourceOperationID: record.id,
@@ -431,17 +447,14 @@ public enum GitRecoveryPlanner {
                 inverseIntent: .unstage,
                 affectedPaths: descriptor.affectedPaths,
                 expectedCurrentHead: record.postCheckpoint?.headCommit,
-                expectedCurrentIndexTree: postIndex,
-                reason: "Validate HEAD and the current index tree against the post-operation checkpoint before restoring staged paths."
+                expectedCurrentIndexTree: record.postCheckpoint?.indexTree,
+                reason: "Restore the exact pre-operation Git index only after validating HEAD and the complete post-operation index snapshot."
             )
         case .unstage:
-            guard descriptor.target != "patch", !descriptor.affectedPaths.isEmpty else {
-                return unavailable(record, "Patch-level unstaging requires the previous index contents to be checkpointed.")
-            }
-            guard let preIndex = record.preCheckpoint?.indexTree,
-                  let postIndex = record.postCheckpoint?.indexTree,
+            guard let preIndex = record.preCheckpoint?.indexSnapshot,
+                  let postIndex = record.postCheckpoint?.indexSnapshot,
                   preIndex != postIndex else {
-                return unavailable(record, "A distinct pre/post index checkpoint is required before restaging can be proposed.")
+                return unavailable(record, "Distinct exact pre/post index snapshots are required before unstaged state can be restored.")
             }
             return GitRecoveryPlan(
                 sourceOperationID: record.id,
@@ -449,8 +462,8 @@ public enum GitRecoveryPlanner {
                 inverseIntent: .stage,
                 affectedPaths: descriptor.affectedPaths,
                 expectedCurrentHead: record.postCheckpoint?.headCommit,
-                expectedCurrentIndexTree: postIndex,
-                reason: "Restaging whole paths can differ from a prior partial index, so checkpoint validation remains mandatory."
+                expectedCurrentIndexTree: record.postCheckpoint?.indexTree,
+                reason: "Restore the exact pre-operation Git index, including partial-staging and index-only flags, after complete checkpoint validation."
             )
         case .switchBranch:
             guard let previousBranch = record.preCheckpoint?.branch,
