@@ -29,19 +29,25 @@ private final class XPCReplyGate<Value: Sendable>: @unchecked Sendable {
 
 /// Client for the XPC service embedded in `Branchlight.app/Contents/XPCServices`.
 ///
-/// This is intentionally not a silent per-operation fallback wrapper. Once Git
-/// mutations move behind XPC, replaying an interrupted mutation in-process would be
-/// unsafe because the remote side may already have changed repository state.
+/// Reads are short and may be retried through a read-only fallback adapter. Mutations
+/// are deliberately different: an interrupted reply can happen after the XPC process
+/// already changed Git state, so mutation calls are bounded but are never replayed
+/// automatically by this client.
 final class BundledGitXPCClient: @unchecked Sendable {
     private let connection: NSXPCConnection
-    private let timeoutSeconds: TimeInterval
+    private let readTimeoutSeconds: TimeInterval
+    private let mutationTimeoutSeconds: TimeInterval
 
-    init(timeoutSeconds: TimeInterval = 5) {
+    init(
+        readTimeoutSeconds: TimeInterval = 5,
+        mutationTimeoutSeconds: TimeInterval = 120
+    ) {
         let connection = NSXPCConnection(serviceName: BranchlightGitXPCContract.serviceName)
         connection.remoteObjectInterface = NSXPCInterface(with: BranchlightGitXPCProtocol.self)
         connection.resume()
         self.connection = connection
-        self.timeoutSeconds = max(0.25, timeoutSeconds)
+        self.readTimeoutSeconds = max(0.25, readTimeoutSeconds)
+        self.mutationTimeoutSeconds = max(1, mutationTimeoutSeconds)
     }
 
     deinit {
@@ -51,7 +57,7 @@ final class BundledGitXPCClient: @unchecked Sendable {
     func probe() async throws -> Int {
         try await withCheckedThrowingContinuation { continuation in
             let gate = XPCReplyGate<Int>(continuation)
-            scheduleTimeout(gate, operation: "probe")
+            scheduleTimeout(gate, operation: "probe", seconds: readTimeoutSeconds)
             guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
                 gate.fail(error)
             }) as? BranchlightGitXPCProtocol else {
@@ -78,7 +84,7 @@ final class BundledGitXPCClient: @unchecked Sendable {
 
         return try await withCheckedThrowingContinuation { continuation in
             let gate = XPCReplyGate<GitRepositoryIdentity>(continuation)
-            scheduleTimeout(gate, operation: "repositoryIdentity")
+            scheduleTimeout(gate, operation: "repositoryIdentity", seconds: readTimeoutSeconds)
             guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
                 gate.fail(error)
             }) as? BranchlightGitXPCProtocol else {
@@ -114,7 +120,7 @@ final class BundledGitXPCClient: @unchecked Sendable {
 
         return try await withCheckedThrowingContinuation { continuation in
             let gate = XPCReplyGate<GitRepositoryIntelligence>(continuation)
-            scheduleTimeout(gate, operation: "repositoryIntelligence")
+            scheduleTimeout(gate, operation: "repositoryIntelligence", seconds: readTimeoutSeconds)
             guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
                 gate.fail(error)
             }) as? BranchlightGitXPCProtocol else {
@@ -142,19 +148,59 @@ final class BundledGitXPCClient: @unchecked Sendable {
         }
     }
 
+    func performMutation(
+        at repositoryURL: URL,
+        mutation: GitXPCMutation
+    ) async throws -> GitXPCMutationResponse {
+        let request = GitXPCMutationRequest(
+            repositoryPath: repositoryURL.standardizedFileURL.path,
+            mutation: mutation
+        )
+        let requestData = try GitXPCCodec.encode(request)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let gate = XPCReplyGate<GitXPCMutationResponse>(continuation)
+            scheduleTimeout(gate, operation: "performMutation", seconds: mutationTimeoutSeconds)
+            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
+                gate.fail(error)
+            }) as? BranchlightGitXPCProtocol else {
+                gate.fail(GitXPCContractError.unavailableProxy)
+                return
+            }
+
+            proxy.performMutation(requestData) { data, error in
+                do {
+                    if let error { throw error }
+                    guard let data else { throw GitXPCContractError.missingReplyPayload }
+                    let response = try GitXPCCodec.decode(
+                        GitXPCMutationResponse.self,
+                        from: data
+                    )
+                    try GitXPCCodec.validateProtocolVersion(response.protocolVersion)
+                    guard response.requestID == request.requestID else {
+                        throw GitXPCContractError.requestIDMismatch
+                    }
+                    gate.succeed(response)
+                } catch {
+                    gate.fail(error)
+                }
+            }
+        }
+    }
+
     private func scheduleTimeout<Value: Sendable>(
         _ gate: XPCReplyGate<Value>,
-        operation: String
+        operation: String,
+        seconds: TimeInterval
     ) {
-        let timeoutSeconds = timeoutSeconds
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeoutSeconds) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + seconds) {
             gate.fail(
                 NSError(
                     domain: "Branchlight.XPC",
                     code: 1,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Branchlight Git XPC \(operation) timed out after \(timeoutSeconds) seconds."
+                            "Branchlight Git XPC \(operation) timed out after \(seconds) seconds. Repository state must be reconciled before retrying any mutation."
                     ]
                 )
             )
