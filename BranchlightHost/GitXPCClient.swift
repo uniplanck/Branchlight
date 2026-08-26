@@ -34,12 +34,14 @@ private final class XPCReplyGate<Value: Sendable>: @unchecked Sendable {
 /// unsafe because the remote side may already have changed repository state.
 final class BundledGitXPCClient: @unchecked Sendable {
     private let connection: NSXPCConnection
+    private let timeoutSeconds: TimeInterval
 
-    init() {
+    init(timeoutSeconds: TimeInterval = 5) {
         let connection = NSXPCConnection(serviceName: BranchlightGitXPCContract.serviceName)
         connection.remoteObjectInterface = NSXPCInterface(with: BranchlightGitXPCProtocol.self)
         connection.resume()
         self.connection = connection
+        self.timeoutSeconds = max(0.25, timeoutSeconds)
     }
 
     deinit {
@@ -49,6 +51,7 @@ final class BundledGitXPCClient: @unchecked Sendable {
     func probe() async throws -> Int {
         try await withCheckedThrowingContinuation { continuation in
             let gate = XPCReplyGate<Int>(continuation)
+            scheduleTimeout(gate, operation: "probe")
             guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
                 gate.fail(error)
             }) as? BranchlightGitXPCProtocol else {
@@ -75,6 +78,7 @@ final class BundledGitXPCClient: @unchecked Sendable {
 
         return try await withCheckedThrowingContinuation { continuation in
             let gate = XPCReplyGate<GitRepositoryIdentity>(continuation)
+            scheduleTimeout(gate, operation: "repositoryIdentity")
             guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
                 gate.fail(error)
             }) as? BranchlightGitXPCProtocol else {
@@ -99,6 +103,62 @@ final class BundledGitXPCClient: @unchecked Sendable {
                     gate.fail(error)
                 }
             }
+        }
+    }
+
+    private func scheduleTimeout<Value: Sendable>(
+        _ gate: XPCReplyGate<Value>,
+        operation: String
+    ) {
+        let timeoutSeconds = timeoutSeconds
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeoutSeconds) {
+            gate.fail(
+                NSError(
+                    domain: "Branchlight.XPC",
+                    code: 1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Branchlight Git XPC \(operation) timed out after \(timeoutSeconds) seconds."
+                    ]
+                )
+            )
+        }
+    }
+}
+
+/// Read-through migration adapter used by the Host while the physical XPC boundary is
+/// being adopted. Repository discovery is safe to retry in-process because it is
+/// read-only. This fallback pattern must never be copied to Git mutations: an XPC
+/// mutation can have changed repository state even when its reply is lost.
+final class XPCRepositoryResolver: @unchecked Sendable {
+    private let client: BundledGitXPCClient
+    private let fallback: any GitService
+
+    init(
+        fallback: any GitService,
+        client: BundledGitXPCClient = BundledGitXPCClient()
+    ) {
+        self.fallback = fallback
+        self.client = client
+    }
+
+    func repositoryRoot(for url: URL) async throws -> URL {
+        do {
+            let identity = try await client.repositoryIdentity(at: url)
+            return URL(
+                fileURLWithPath: identity.workingTreeRoot,
+                isDirectory: true
+            ).standardizedFileURL
+        } catch {
+            return try await fallback.repositoryRoot(for: url)
+        }
+    }
+
+    func repositoryIdentity(at repositoryURL: URL) async throws -> GitRepositoryIdentity {
+        do {
+            return try await client.repositoryIdentity(at: repositoryURL)
+        } catch {
+            return try await fallback.repositoryIdentity(at: repositoryURL)
         }
     }
 }
