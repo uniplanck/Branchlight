@@ -6,6 +6,8 @@ DERIVED_DATA="$ROOT/.build/development-derived-data"
 APP="$DERIVED_DATA/Build/Products/Debug/Branchlight.app"
 APPLICATIONS_APP="/Applications/Branchlight.app"
 EXTENSION_ID="com.uniplanck.Branchlight.Extension"
+BACKUP_DIR="$HOME/Library/Caches/com.uniplanck.Branchlight/DevelopmentBackups"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 cd "$ROOT"
 
@@ -62,9 +64,20 @@ if [[ -d "$APPLICATIONS_APP/Contents/PlugIns/BranchlightFinderExtension.appex" ]
 fi
 
 if [[ -d "$APPLICATIONS_APP" ]]; then
-  BACKUP="/Applications/Branchlight.app.backup-$(date +%Y%m%d-%H%M%S)"
+  if [[ -x "$LSREGISTER" ]]; then
+    "$LSREGISTER" -u "$APPLICATIONS_APP" >/dev/null 2>&1 || true
+  fi
+  mkdir -p "$BACKUP_DIR"
+  BACKUP="$BACKUP_DIR/Branchlight-$(date +%Y%m%d-%H%M%S).bundle-backup"
   mv "$APPLICATIONS_APP" "$BACKUP"
-  echo "Previous app backed up: $BACKUP"
+  echo "Previous app backed up outside LaunchServices-visible app locations: $BACKUP"
+
+  mapfile -t OLD_BACKUPS < <(find "$BACKUP_DIR" -maxdepth 1 -type d -name 'Branchlight-*.bundle-backup' -print | sort -r)
+  if [[ "${#OLD_BACKUPS[@]}" -gt 3 ]]; then
+    for old in "${OLD_BACKUPS[@]:3}"; do
+      rm -rf "$old"
+    done
+  fi
 fi
 
 ditto "$APP" "$APPLICATIONS_APP"
