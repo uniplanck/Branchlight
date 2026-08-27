@@ -99,6 +99,7 @@ targets:
         SKIP_INSTALL: YES
     dependencies:
       - target: BranchlightCore
+        embed: true
 
   BranchlightCoreTests:
     type: bundle.unit-test
