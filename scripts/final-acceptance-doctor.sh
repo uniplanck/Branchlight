@@ -96,8 +96,13 @@ else
   pass "GitHub OAuth configuration"
 fi
 
-pending_item "VoiceOver real-Mac navigation acceptance must be performed manually once"
-pending_workstream "VoiceOver real-Mac acceptance"
+VOICEOVER_ACCEPTANCE="$ROOT/.branchlight-local-acceptance/voiceover.accepted"
+if [[ -f "$VOICEOVER_ACCEPTANCE" ]]; then
+  pass "VoiceOver real-Mac acceptance recorded"
+else
+  pending_item "VoiceOver real-Mac navigation acceptance must be performed manually once"
+  pending_workstream "VoiceOver real-Mac acceptance"
+fi
 
 echo
 if [[ "$FAIL" -gt 0 ]]; then
