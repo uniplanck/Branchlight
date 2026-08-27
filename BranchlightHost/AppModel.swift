@@ -40,6 +40,8 @@ final class AppModel: ObservableObject {
     private let repositoryResolver: XPCRepositoryResolver
     private let historyMutationService: any GitHistoryMutationService
     private var repositoryWatcher: RepositoryWatcher?
+    private var watcherRefreshPending = false
+    private var watcherRefreshDrainActive = false
 
     init() {
         let engine = SystemGitEngine()
@@ -737,14 +739,36 @@ final class AppModel: ObservableObject {
 
     private func startWatching(path: String) {
         repositoryWatcher?.stop()
+        watcherRefreshPending = false
+
         let watcher = RepositoryWatcher { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self, !self.isRefreshing else { return }
-                await self.refreshStatusOnly()
+                self?.scheduleWatcherRefresh()
             }
         }
         repositoryWatcher = watcher
         watcher.start(path: path)
+    }
+
+    private func scheduleWatcherRefresh() {
+        watcherRefreshPending = true
+        guard !watcherRefreshDrainActive else { return }
+
+        watcherRefreshDrainActive = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.watcherRefreshDrainActive = false }
+
+            while self.watcherRefreshPending {
+                if self.isRefreshing {
+                    try? await Task<Never, Never>.sleep(nanoseconds: 100_000_000)
+                    continue
+                }
+
+                self.watcherRefreshPending = false
+                await self.refreshStatusOnly()
+            }
+        }
     }
 
     private func runMutation(
