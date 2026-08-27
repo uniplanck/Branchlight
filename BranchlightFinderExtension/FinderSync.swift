@@ -70,7 +70,10 @@ final class FinderSync: FIFinderSync {
         let menu = NSMenu(title: "Branchlight")
 
         if !urls.isEmpty {
-            let envelope = currentEnvelope()
+            // Context menus are user-driven, not a Finder hot path. Reload the shared
+            // envelope here so a missed Darwin notification cannot leave actionable
+            // status stale while badge callbacks remain memory-only.
+            let envelope = reloadCachedEnvelopeFromDisk()
             let aggregate = GitStatusClassifier.aggregate(
                 urls.map { envelope.statusKind(forAbsolutePath: $0.standardizedFileURL.path) }
             )
@@ -195,6 +198,12 @@ final class FinderSync: FIFinderSync {
         envelopeLock.lock()
         defer { envelopeLock.unlock() }
         return cachedEnvelope
+    }
+
+    private func reloadCachedEnvelopeFromDisk() -> StatusCacheEnvelope {
+        let envelope = cache?.load() ?? StatusCacheEnvelope()
+        replaceCachedEnvelope(envelope)
+        return envelope
     }
 
     private func registerBadges() {
