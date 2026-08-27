@@ -23,6 +23,7 @@ Package.resolved
 
 # Local signing / provisioning
 Config/Branchlight.local.xcconfig
+Config/Branchlight.oauth.local.xcconfig
 *.mobileprovision
 *.provisionprofile
 *.cer
