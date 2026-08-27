@@ -117,11 +117,24 @@ public enum FinderIntegrationCompatibility {
 
 public enum SharedStatusNotifications {
     public static let cacheChanged = CFNotificationName("com.uniplanck.branchlight.cache.changed" as CFString)
+    public static let finderRequestChanged = CFNotificationName(
+        "com.uniplanck.branchlight.finder-request.changed" as CFString
+    )
 
     public static func postCacheChanged() {
         CFNotificationCenterPostNotification(
             CFNotificationCenterGetDarwinNotifyCenter(),
             cacheChanged,
+            nil,
+            nil,
+            true
+        )
+    }
+
+    public static func postFinderRequestChanged() {
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            finderRequestChanged,
             nil,
             nil,
             true
@@ -202,8 +215,13 @@ public final class SharedStatusCache: @unchecked Sendable {
     }
 
     public func setPendingOpenPath(_ path: String) {
-        try? withLock {
-            try writeJSON(path, to: pendingOpenPathURL)
+        do {
+            try withLock {
+                try writeJSON(path, to: pendingOpenPathURL)
+            }
+            SharedStatusNotifications.postFinderRequestChanged()
+        } catch {
+            return
         }
     }
 
@@ -227,6 +245,7 @@ public final class SharedStatusCache: @unchecked Sendable {
         try withLock {
             try writeJSON(intent, to: pendingFinderIntentURL)
         }
+        SharedStatusNotifications.postFinderRequestChanged()
     }
 
     public func consumePendingFinderIntent(
