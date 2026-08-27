@@ -115,6 +115,43 @@ echo
 
 declare -a CANDIDATES=()
 
+echo "== LaunchServices bundle registrations =="
+LS_REGISTERED_PATHS=()
+if [[ -x "$LSREGISTER" && -n "$HOST_ID" ]]; then
+  CURRENT_LS_PATH=""
+  while IFS= read -r line; do
+    case "$line" in
+      path:*)
+        CURRENT_LS_PATH="${line#path:}"
+        CURRENT_LS_PATH="${CURRENT_LS_PATH#"${CURRENT_LS_PATH%%[![:space:]]*}"}"
+        ;;
+      identifier:*)
+        CURRENT_LS_ID="${line#identifier:}"
+        CURRENT_LS_ID="${CURRENT_LS_ID#"${CURRENT_LS_ID%%[![:space:]]*}"}"
+        if [[ "$CURRENT_LS_ID" == "$HOST_ID" && -n "$CURRENT_LS_PATH" ]]; then
+          LS_REGISTERED_PATHS+=("$CURRENT_LS_PATH")
+        fi
+        ;;
+      -------------------------------------------------------------------------------*)
+        CURRENT_LS_PATH=""
+        ;;
+    esac
+  done < <("$LSREGISTER" -dump 2>/dev/null || true)
+fi
+
+if [[ "${#LS_REGISTERED_PATHS[@]}" -eq 0 ]]; then
+  echo "No LaunchServices registrations found for $HOST_ID"
+else
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    echo "  $path"
+    if [[ "$path" != "$CANONICAL_APP" ]]; then
+      CANDIDATES+=("$path")
+    fi
+  done < <(printf "%s\n" "${LS_REGISTERED_PATHS[@]}" | awk '!seen[$0]++')
+fi
+
+
 add_candidate() {
   local path="$1"
   [[ -n "$path" ]] || return 0
@@ -274,6 +311,33 @@ killall pkd >/dev/null 2>&1 || true
 killall Finder >/dev/null 2>&1 || true
 killall "System Settings" >/dev/null 2>&1 || true
 sleep 2
+
+echo
+echo "== Remaining LaunchServices registrations =="
+REMAINING_LS=0
+if [[ -x "$LSREGISTER" && -n "$HOST_ID" ]]; then
+  CURRENT_LS_PATH=""
+  while IFS= read -r line; do
+    case "$line" in
+      path:*)
+        CURRENT_LS_PATH="${line#path:}"
+        CURRENT_LS_PATH="${CURRENT_LS_PATH#"${CURRENT_LS_PATH%%[![:space:]]*}"}"
+        ;;
+      identifier:*)
+        CURRENT_LS_ID="${line#identifier:}"
+        CURRENT_LS_ID="${CURRENT_LS_ID#"${CURRENT_LS_ID%%[![:space:]]*}"}"
+        if [[ "$CURRENT_LS_ID" == "$HOST_ID" && -n "$CURRENT_LS_PATH" ]]; then
+          echo "$CURRENT_LS_PATH"
+          REMAINING_LS=$((REMAINING_LS + 1))
+        fi
+        ;;
+      -------------------------------------------------------------------------------*)
+        CURRENT_LS_PATH=""
+        ;;
+    esac
+  done < <("$LSREGISTER" -dump 2>/dev/null || true)
+fi
+echo "LaunchServices registrations remaining: $REMAINING_LS"
 
 echo
 echo "== Canonical extension registrations =="
