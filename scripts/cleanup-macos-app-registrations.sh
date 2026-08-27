@@ -149,7 +149,7 @@ mkdir -p "$QUARANTINE_DIR"
 
 for path in "${UNIQUE[@]}"; do
   case "$path" in
-    "$HOME/Library/Developer/Xcode/DerivedData/"*|"$SCRIPT_ROOT/.build/"*)
+    *"/Library/Developer/Xcode/DerivedData/"*|*"/.build/"*|*"/Build/Products/"*)
       rm -rf "$path"
       echo "Removed development build copy: $path"
       ;;
