@@ -22,6 +22,8 @@ HOST="$APP_PATH"
 EXT="$APP_PATH/Contents/PlugIns/BranchlightFinderExtension.appex"
 XPC="$APP_PATH/Contents/XPCServices/BranchlightGitService.xpc"
 
+XPC_FRAMEWORK="$XPC/Contents/Frameworks/BranchlightCore.framework"
+
 for item in "$HOST" "$EXT" "$XPC"; do
   echo
   echo "== $item =="
@@ -29,6 +31,15 @@ for item in "$HOST" "$EXT" "$XPC"; do
   codesign -dvvv "$item" 2>&1 | grep -E "^(Identifier|TeamIdentifier|Authority)=" || true
   codesign -d --entitlements :- "$item" 2>/dev/null || true
 done
+
+echo
+echo "== Git XPC runtime framework =="
+if [[ -d "$XPC_FRAMEWORK" ]]; then
+  echo "FOUND: $XPC_FRAMEWORK"
+  otool -L "$XPC/Contents/MacOS/BranchlightGitService" 2>/dev/null || true
+else
+  echo "MISSING: $XPC_FRAMEWORK"
+fi
 
 echo
 echo "== PlugInKit Finder registration =="
