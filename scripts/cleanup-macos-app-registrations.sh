@@ -76,6 +76,19 @@ else
 fi
 
 echo
+echo "== Unregister plug-ins from non-canonical copies =="
+for path in "${UNIQUE[@]}"; do
+  if [[ -d "$path/Contents/PlugIns" ]]; then
+    while IFS= read -r ext; do
+      [[ -d "$ext" ]] || continue
+      pluginkit -r "$ext" >/dev/null 2>&1 || true
+      ext_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$ext/Contents/Info.plist" 2>/dev/null || true)"
+      echo "Unregistered plug-in: ${ext_id:-unknown} @ $ext"
+    done < <(find "$path/Contents/PlugIns" -type d -name '*.appex' -prune -print 2>/dev/null || true)
+  fi
+done
+
+echo
 echo "== Unregister non-canonical copies from LaunchServices =="
 if [[ -x "$LSREGISTER" ]]; then
   for path in "${UNIQUE[@]}"; do
@@ -114,8 +127,23 @@ else
   exit 66
 fi
 
+echo
+echo "== Refresh plug-in and Settings caches =="
+killall pkd >/dev/null 2>&1 || true
 killall Finder >/dev/null 2>&1 || true
 killall "System Settings" >/dev/null 2>&1 || true
+sleep 2
+
+echo
+echo "== Canonical extension registrations =="
+if [[ "${#EXTENSION_IDS[@]}" -eq 0 ]]; then
+  echo "No canonical extension IDs detected."
+else
+  for id in "${EXTENSION_IDS[@]}"; do
+    echo "-- $id"
+    pluginkit -m -A -D -vvv -i "$id" 2>/dev/null || true
+  done
+fi
 
 echo
 echo "REGISTRATION_CLEANUP_PASS"
