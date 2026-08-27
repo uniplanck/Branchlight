@@ -148,6 +148,9 @@ jobs:
               "ServiceType: Application",
               "BranchlightXPCIntegrationTests:",
               "TEST_HOST: $(BUILT_PRODUCTS_DIR)/Branchlight.app/Contents/MacOS/Branchlight",
+              "Debug: Config/Branchlight.xcconfig",
+              "Release: Config/Branchlight.xcconfig",
+              "REGISTER_APP_GROUPS: YES",
           ]
           for needle in required:
               if needle not in project:
@@ -157,6 +160,25 @@ jobs:
           if project.count("ENABLE_HARDENED_RUNTIME: YES") < 3:
               print("Host, Finder Extension and Git XPC service must enable Hardened Runtime in project.yml")
               sys.exit(1)
+
+          signing_config = Path("Config/Branchlight.xcconfig").read_text()
+          for needle in [
+              "REGISTER_APP_GROUPS = YES",
+              '#include? "Branchlight.local.xcconfig"',
+          ]:
+              if needle not in signing_config:
+                  print(f"Development signing config lost required invariant: {needle}")
+                  sys.exit(1)
+
+          signing_bootstrap = Path("scripts/configure-development-signing.sh").read_text()
+          for needle in [
+              "DEVELOPMENT_TEAM = $TEAM_ID",
+              "REGISTER_APP_GROUPS = YES",
+              "xcodegen generate",
+          ]:
+              if needle not in signing_bootstrap:
+                  print(f"Development signing bootstrap lost required step: {needle}")
+                  sys.exit(1)
 
           release_script = Path("scripts/build-release.sh").read_text()
           for needle in [
