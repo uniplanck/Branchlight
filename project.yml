@@ -38,6 +38,7 @@ targets:
         CFBundleShortVersionString: "0.1.0"
         CFBundleVersion: "1"
         NSPrincipalClass: NSApplication
+        BranchlightGitHubClientID: $(BRANCHLIGHT_GITHUB_CLIENT_ID)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight
