@@ -6,6 +6,7 @@ CANONICAL_APP="${2:-/Applications/$APP_NAME.app}"
 HOST_ID="${3:-}"
 EXTENSION_ID="${4:-}"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [[ -z "$HOST_ID" && -f "$CANONICAL_APP/Contents/Info.plist" ]]; then
   HOST_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$CANONICAL_APP/Contents/Info.plist" 2>/dev/null || true)"
@@ -54,6 +55,7 @@ done < <(mdfind "kMDItemCFBundleIdentifier == '$HOST_ID'" 2>/dev/null || true)
 for root in \
   "$HOME/Library/Developer/Xcode/DerivedData" \
   "$HOME/Library/Caches" \
+  "$SCRIPT_ROOT/.build" \
   "/Applications"; do
   [[ -d "$root" ]] || continue
   while IFS= read -r path; do
@@ -68,6 +70,47 @@ if [[ "${#CANDIDATES[@]}" -gt 0 ]]; then
   done < <(printf "%s\n" "${CANDIDATES[@]}" | awk '!seen[$0]++')
 fi
 
+echo "== PlugInKit registered extension paths =="
+REGISTERED_EXT_PATHS=()
+for id in "${EXTENSION_IDS[@]}"; do
+  while IFS= read -r line; do
+    case "$line" in
+      *"Path = "*)
+        ext_path="${line#*Path = }"
+        [[ -n "$ext_path" ]] && REGISTERED_EXT_PATHS+=("$ext_path")
+        ;;
+    esac
+  done < <(pluginkit -m -A -D -vvv -i "$id" 2>/dev/null || true)
+done
+
+if [[ "${#REGISTERED_EXT_PATHS[@]}" -gt 0 ]]; then
+  while IFS= read -r ext; do
+    [[ -n "$ext" ]] || continue
+    if [[ "$ext" == "$CANONICAL_APP/"* ]]; then
+      echo "Keep canonical: $ext"
+      continue
+    fi
+
+    pluginkit -r "$ext" >/dev/null 2>&1 || true
+    echo "Unregistered registered plug-in: $ext"
+
+    parent_app="${ext%%/Contents/PlugIns/*}"
+    if [[ -d "$parent_app" && "$parent_app" != "$CANONICAL_APP" ]]; then
+      add_candidate "$parent_app"
+    fi
+  done < <(printf "%s\n" "${REGISTERED_EXT_PATHS[@]}" | awk '!seen[$0]++')
+
+  UNIQUE=()
+  if [[ "${#CANDIDATES[@]}" -gt 0 ]]; then
+    while IFS= read -r path; do
+      [[ -n "$path" ]] && UNIQUE+=("$path")
+    done < <(printf "%s\n" "${CANDIDATES[@]}" | awk '!seen[$0]++')
+  fi
+else
+  echo "No registered extension paths found."
+fi
+
+echo
 echo "== Non-canonical app registrations found =="
 if [[ "${#UNIQUE[@]}" -eq 0 ]]; then
   echo "None"
@@ -106,9 +149,9 @@ mkdir -p "$QUARANTINE_DIR"
 
 for path in "${UNIQUE[@]}"; do
   case "$path" in
-    "$HOME/Library/Developer/Xcode/DerivedData/"*)
+    "$HOME/Library/Developer/Xcode/DerivedData/"*|"$SCRIPT_ROOT/.build/"*)
       rm -rf "$path"
-      echo "Removed DerivedData copy: $path"
+      echo "Removed development build copy: $path"
       ;;
     "/Applications/$APP_NAME.app.backup-"*)
       stamp="$(date +%Y%m%d-%H%M%S)-$RANDOM"
