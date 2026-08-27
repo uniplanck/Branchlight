@@ -200,6 +200,12 @@ jobs:
           print("Release SoT, bundled XPC, app-hosted XPC E2E, DMG and signed/notarized pipeline invariants verified")
           PY
 
+      - name: Verify helper script syntax
+        run: |
+          for script in scripts/*.sh; do
+            bash -n "$script"
+          done
+
       - name: Verify accessibility source contract
         run: bash scripts/verify-accessibility-contract.sh
 
