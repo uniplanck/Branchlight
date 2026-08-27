@@ -12,7 +12,7 @@ jobs:
   test:
     name: Build & Test
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 35
 
     steps:
       - name: Checkout
@@ -20,6 +20,194 @@ jobs:
 
       - name: Xcode version
         run: xcodebuild -version
+
+      - name: Generate Xcode project from source of truth
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+          xcodegen generate
+
+      - name: Upload generated Xcode project
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-xcodeproj
+          path: Branchlight.xcodeproj/project.pbxproj
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Verify Xcode project source coverage
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import sys
+
+          roots = [
+              Path("BranchlightCore"),
+              Path("BranchlightHost"),
+              Path("BranchlightFinderExtension"),
+              Path("BranchlightXPC"),
+              Path("BranchlightCoreTests"),
+              Path("BranchlightXPCIntegrationTests"),
+          ]
+          project = Path("Branchlight.xcodeproj/project.pbxproj").read_text()
+          sources = sorted(
+              path
+              for root in roots
+              for path in root.rglob("*.swift")
+              if path.is_file()
+          )
+
+          by_name = {}
+          for source in sources:
+              by_name.setdefault(source.name, []).append(source)
+
+          duplicates = {
+              name: paths
+              for name, paths in by_name.items()
+              if len(paths) > 1
+          }
+          if duplicates:
+              print("Duplicate Swift basenames make explicit project coverage ambiguous:")
+              for name, paths in sorted(duplicates.items()):
+                  print(f"  {name}: " + ", ".join(map(str, paths)))
+              sys.exit(1)
+
+          missing = [
+              source
+              for source in sources
+              if f"path = {source.name};" not in project
+          ]
+          if missing:
+              print("Swift sources missing from generated Branchlight.xcodeproj:")
+              for source in missing:
+                  print(f"  {source}")
+              sys.exit(1)
+
+          print(f"Verified {len(sources)} Swift source files are represented in Branchlight.xcodeproj")
+          PY
+
+      - name: Verify runtime security boundaries
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import sys
+
+          finder_forbidden = {
+              "Process(": "Finder must not spawn subprocesses",
+              "URLSession": "Finder must not perform network requests",
+              "URLRequest": "Finder must not perform network requests",
+              "import Security": "Finder must not own credentials",
+              "SecItem": "Finder must not access Keychain credentials",
+              "api.github.com": "Finder must not call GitHub APIs",
+              "github.com/login": "Finder must not own OAuth flows",
+              "NSXPCConnection": "Finder must not synchronously depend on the Git XPC service",
+          }
+          core_forbidden = {
+              "import Security": "Core must not own Keychain credentials",
+              "SecItem": "Core must not access Keychain credentials",
+              "kSecClass": "Core must not access Keychain credentials",
+              "oauth-token": "Core must not persist OAuth credentials",
+          }
+
+          violations = []
+          for path in Path("BranchlightFinderExtension").rglob("*.swift"):
+              text = path.read_text()
+              for needle, reason in finder_forbidden.items():
+                  if needle in text:
+                      violations.append(f"{path}: {reason} ({needle!r})")
+
+          for path in Path("BranchlightCore").rglob("*.swift"):
+              text = path.read_text()
+              for needle, reason in core_forbidden.items():
+                  if needle in text:
+                      violations.append(f"{path}: {reason} ({needle!r})")
+
+          if violations:
+              print("Runtime security boundary violations:")
+              for violation in violations:
+                  print(f"  {violation}")
+              sys.exit(1)
+
+          print("Finder subprocess/network/credential/XPC boundary and Core Keychain boundary verified")
+          PY
+
+      - name: Verify release configuration source of truth
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import sys
+
+          project = Path("project.yml").read_text()
+          required = [
+              "CODE_SIGN_ENTITLEMENTS: BranchlightHost/BranchlightHost.entitlements",
+              "CODE_SIGN_ENTITLEMENTS: BranchlightFinderExtension/BranchlightFinderExtension.entitlements",
+              "type: xpc-service",
+              "PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight.GitService",
+              "ServiceType: Application",
+              "BranchlightXPCIntegrationTests:",
+              "TEST_HOST: $(BUILT_PRODUCTS_DIR)/Branchlight.app/Contents/MacOS/Branchlight",
+              "Debug: Config/Branchlight.xcconfig",
+              "Release: Config/Branchlight.xcconfig",
+              "REGISTER_APP_GROUPS: YES",
+          ]
+          for needle in required:
+              if needle not in project:
+                  print(f"Missing release configuration invariant: {needle}")
+                  sys.exit(1)
+
+          if project.count("ENABLE_HARDENED_RUNTIME: YES") < 3:
+              print("Host, Finder Extension and Git XPC service must enable Hardened Runtime in project.yml")
+              sys.exit(1)
+
+          signing_config = Path("Config/Branchlight.xcconfig").read_text()
+          for needle in [
+              "REGISTER_APP_GROUPS = YES",
+              '#include? "Branchlight.local.xcconfig"',
+          ]:
+              if needle not in signing_config:
+                  print(f"Development signing config lost required invariant: {needle}")
+                  sys.exit(1)
+
+          signing_bootstrap = Path("scripts/configure-development-signing.sh").read_text()
+          for needle in [
+              "DEVELOPMENT_TEAM = $TEAM_ID",
+              "REGISTER_APP_GROUPS = YES",
+              "xcodegen generate",
+          ]:
+              if needle not in signing_bootstrap:
+                  print(f"Development signing bootstrap lost required step: {needle}")
+                  sys.exit(1)
+
+          release_script = Path("scripts/build-release.sh").read_text()
+          for needle in [
+              "ENABLE_HARDENED_RUNTIME=YES",
+              "Contents/XPCServices/BranchlightGitService.xpc",
+              "codesign --verify --deep --strict",
+              "xcrun notarytool submit",
+              "xcrun stapler staple",
+              "hdiutil create",
+              "hdiutil verify",
+              ".dmg",
+              "spctl --assess --type open",
+              "shasum -a 256",
+          ]:
+              if needle not in release_script:
+                  print(f"Release script lost required safety step: {needle}")
+                  sys.exit(1)
+
+          print("Release SoT, bundled XPC, app-hosted XPC E2E, DMG and signed/notarized pipeline invariants verified")
+          PY
+
+      - name: Verify helper script syntax
+        run: |
+          for script in scripts/*.sh; do
+            bash -n "$script"
+          done
+
+      - name: Verify accessibility source contract
+        run: bash scripts/verify-accessibility-contract.sh
 
       - name: Test Branchlight
         run: |
@@ -31,3 +219,6 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             COMPILER_INDEX_STORE_ENABLE=NO \
             test
+
+      - name: Verify canonical unsigned Release pipeline
+        run: bash scripts/build-release.sh --unsigned

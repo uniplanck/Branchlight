@@ -100,3 +100,401 @@ public enum GitStatusClassifier {
         kinds.max(by: { priority($0) < priority($1) }) ?? .clean
     }
 }
+
+public enum GitRecoveryValidationIssue: String, Codable, CaseIterable, Hashable, Sendable {
+    case unavailablePlan
+    case sourceOperationMismatch
+    case operationNotSucceeded
+    case missingPostCheckpoint
+    case headChanged
+    case indexChanged
+    case branchChanged
+    case detachedHeadChanged
+    case operationInProgress
+    case workingTreeNotClean
+    case unsupportedExactIndexRestore
+    case missingExactIndexSnapshot
+    case missingRecoveryTarget
+}
+
+public struct GitRecoveryValidation: Codable, Hashable, Sendable {
+    public let issues: Set<GitRecoveryValidationIssue>
+
+    public init(issues: Set<GitRecoveryValidationIssue>) {
+        self.issues = issues
+    }
+
+    public var isValid: Bool { issues.isEmpty }
+}
+
+public enum GitRecoveryAction: Codable, Hashable, Sendable {
+    case restoreIndex(GitIndexSnapshot)
+    case switchBranch(String)
+    case revertCommit(String)
+    case removeWorktree(String)
+}
+
+public enum GitRecoveryValidationError: LocalizedError, Sendable {
+    case rejected(Set<GitRecoveryValidationIssue>)
+
+    public var errorDescription: String? {
+        switch self {
+        case .rejected(let issues):
+            return "Recovery validation failed: \(issues.map(\.rawValue).sorted().joined(separator: ", "))."
+        }
+    }
+}
+
+public enum GitRecoveryValidator {
+    public static func validate(
+        plan: GitRecoveryPlan,
+        sourceRecord: GitOperationRecord,
+        currentCheckpoint: GitRepositoryCheckpoint,
+        currentStatus: GitStatusSnapshot? = nil
+    ) -> GitRecoveryValidation {
+        var issues: Set<GitRecoveryValidationIssue> = []
+
+        guard plan.availability == .validationRequired else {
+            return GitRecoveryValidation(issues: [.unavailablePlan])
+        }
+
+        if plan.sourceOperationID != sourceRecord.id {
+            issues.insert(.sourceOperationMismatch)
+        }
+        if sourceRecord.state != .succeeded {
+            issues.insert(.operationNotSucceeded)
+        }
+        guard let post = sourceRecord.postCheckpoint else {
+            issues.insert(.missingPostCheckpoint)
+            return GitRecoveryValidation(issues: issues)
+        }
+
+        if let expectedHead = plan.expectedCurrentHead, currentCheckpoint.headCommit != expectedHead {
+            issues.insert(.headChanged)
+        }
+        if let expectedIndex = plan.expectedCurrentIndexTree, currentCheckpoint.indexTree != expectedIndex {
+            issues.insert(.indexChanged)
+        }
+        if currentCheckpoint.branch != post.branch {
+            issues.insert(.branchChanged)
+        }
+        if currentCheckpoint.isDetachedHead != post.isDetachedHead {
+            issues.insert(.detachedHeadChanged)
+        }
+        if currentCheckpoint.operationMode != .normal {
+            issues.insert(.operationInProgress)
+        }
+
+        switch plan.inverseIntent {
+        case .stage, .unstage:
+            guard sourceRecord.preCheckpoint?.indexSnapshot != nil,
+                  let expectedPostIndex = post.indexSnapshot,
+                  let currentIndex = currentCheckpoint.indexSnapshot else {
+                issues.insert(.missingExactIndexSnapshot)
+                break
+            }
+            if currentIndex != expectedPostIndex {
+                issues.insert(.indexChanged)
+            }
+        case .switchBranch, .revert:
+            if let currentStatus, !currentStatus.isClean {
+                issues.insert(.workingTreeNotClean)
+            }
+            if plan.target?.isEmpty != false {
+                issues.insert(.missingRecoveryTarget)
+            }
+        case .worktreeRemove:
+            if plan.target?.isEmpty != false {
+                issues.insert(.missingRecoveryTarget)
+            }
+        case .none:
+            issues.insert(.unavailablePlan)
+        default:
+            issues.insert(.unavailablePlan)
+        }
+
+        return GitRecoveryValidation(issues: issues)
+    }
+
+    public static func validatedAction(
+        plan: GitRecoveryPlan,
+        sourceRecord: GitOperationRecord,
+        currentCheckpoint: GitRepositoryCheckpoint,
+        currentStatus: GitStatusSnapshot? = nil
+    ) throws -> GitRecoveryAction {
+        let validation = validate(
+            plan: plan,
+            sourceRecord: sourceRecord,
+            currentCheckpoint: currentCheckpoint,
+            currentStatus: currentStatus
+        )
+        guard validation.isValid else {
+            throw GitRecoveryValidationError.rejected(validation.issues)
+        }
+
+        switch plan.inverseIntent {
+        case .stage, .unstage:
+            guard let snapshot = sourceRecord.preCheckpoint?.indexSnapshot else {
+                throw GitRecoveryValidationError.rejected([.missingExactIndexSnapshot])
+            }
+            return .restoreIndex(snapshot)
+        case .switchBranch:
+            guard let target = plan.target else {
+                throw GitRecoveryValidationError.rejected([.missingRecoveryTarget])
+            }
+            return .switchBranch(target)
+        case .revert:
+            guard let target = plan.target else {
+                throw GitRecoveryValidationError.rejected([.missingRecoveryTarget])
+            }
+            return .revertCommit(target)
+        case .worktreeRemove:
+            guard let target = plan.target else {
+                throw GitRecoveryValidationError.rejected([.missingRecoveryTarget])
+            }
+            return .removeWorktree(target)
+        default:
+            throw GitRecoveryValidationError.rejected([.unavailablePlan])
+        }
+    }
+}
+
+public enum GitMutationAdmissionState: String, Codable, Hashable, Sendable {
+    case allowed
+    case confirmationRequired
+    case blocked
+}
+
+public struct GitMutationAdmission: Codable, Hashable, Sendable {
+    public let report: GitPreflightReport
+    public let state: GitMutationAdmissionState
+
+    public init(report: GitPreflightReport, confirmationProvided: Bool = false) {
+        self.report = report
+        if !report.canProceed {
+            state = .blocked
+        } else if report.requiresConfirmation && !confirmationProvided {
+            state = .confirmationRequired
+        } else {
+            state = .allowed
+        }
+    }
+
+    public var mayExecute: Bool { state == .allowed }
+}
+
+public enum GitMutationAdmissionError: LocalizedError, Sendable {
+    case blocked(GitPreflightReport)
+    case confirmationRequired(GitPreflightReport)
+
+    public var errorDescription: String? {
+        switch self {
+        case .blocked(let report):
+            return report.blockingReasons.first ?? "The Git operation is blocked by the current repository state."
+        case .confirmationRequired(let report):
+            return report.warnings.first ?? "This Git operation requires explicit confirmation."
+        }
+    }
+}
+
+public extension GitService {
+    func mutationAdmission(
+        at repositoryURL: URL,
+        intent: GitMutationIntent,
+        confirmationProvided: Bool = false
+    ) async throws -> GitMutationAdmission {
+        let intelligence = try await repositoryIntelligence(at: repositoryURL)
+        let report = GitSafetyPreflight.evaluate(intent: intent, intelligence: intelligence)
+        return GitMutationAdmission(report: report, confirmationProvided: confirmationProvided)
+    }
+
+    @discardableResult
+    func requireMutationAdmission(
+        at repositoryURL: URL,
+        intent: GitMutationIntent,
+        confirmationProvided: Bool = false
+    ) async throws -> GitPreflightReport {
+        let admission = try await mutationAdmission(
+            at: repositoryURL,
+            intent: intent,
+            confirmationProvided: confirmationProvided
+        )
+        switch admission.state {
+        case .allowed:
+            return admission.report
+        case .confirmationRequired:
+            throw GitMutationAdmissionError.confirmationRequired(admission.report)
+        case .blocked:
+            throw GitMutationAdmissionError.blocked(admission.report)
+        }
+    }
+}
+
+public struct GitConflictFile: Hashable, Identifiable, Sendable {
+    public let path: String
+    public let base: String?
+    public let ours: String?
+    public let theirs: String?
+    public let result: String?
+
+    public var id: String { path }
+
+    public init(path: String, base: String?, ours: String?, theirs: String?, result: String?) {
+        self.path = path
+        self.base = base
+        self.ours = ours
+        self.theirs = theirs
+        self.result = result
+    }
+}
+
+public enum GitConflictWorkspaceError: LocalizedError, Sendable {
+    case notConflicted(String)
+    case invalidPath(String)
+    case unsupportedBinary(String)
+    case fileTooLarge(String)
+    case unreadableResult(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .notConflicted(let path):
+            return "\(path) is not an active conflicted path."
+        case .invalidPath(let path):
+            return "The conflict path is outside the repository: \(path)."
+        case .unsupportedBinary(let path):
+            return "Binary conflict resolution is not supported for \(path)."
+        case .fileTooLarge(let path):
+            return "\(path) is too large for the text conflict workspace."
+        case .unreadableResult(let path):
+            return "The working-tree result for \(path) could not be read as UTF-8 text."
+        }
+    }
+}
+
+public extension SystemGitEngine {
+    func conflictFile(
+        at repositoryURL: URL,
+        path: String,
+        maximumBytes: Int = 2 * 1024 * 1024
+    ) throws -> GitConflictFile {
+        let root = try repositoryRoot(for: repositoryURL).standardizedFileURL
+        let snapshot = try status(at: root)
+        guard snapshot.paths.contains(where: { $0.path == path && $0.kind == .conflicted }) else {
+            throw GitConflictWorkspaceError.notConflicted(path)
+        }
+
+        let resultURL = try validatedConflictPath(path, root: root)
+        let base = try conflictStageText(stage: 1, path: path, root: root, maximumBytes: maximumBytes)
+        let ours = try conflictStageText(stage: 2, path: path, root: root, maximumBytes: maximumBytes)
+        let theirs = try conflictStageText(stage: 3, path: path, root: root, maximumBytes: maximumBytes)
+
+        let result: String?
+        if FileManager.default.fileExists(atPath: resultURL.path) {
+            let data = try Data(contentsOf: resultURL, options: [.mappedIfSafe])
+            try validateConflictTextData(data, path: path, maximumBytes: maximumBytes)
+            guard let decoded = String(data: data, encoding: .utf8) else {
+                throw GitConflictWorkspaceError.unreadableResult(path)
+            }
+            result = decoded
+        } else {
+            result = nil
+        }
+
+        return GitConflictFile(path: path, base: base, ours: ours, theirs: theirs, result: result)
+    }
+
+    @discardableResult
+    func resolveConflict(
+        at repositoryURL: URL,
+        path: String,
+        result: String,
+        maximumBytes: Int = 2 * 1024 * 1024
+    ) throws -> GitStatusSnapshot {
+        let root = try repositoryRoot(for: repositoryURL).standardizedFileURL
+        _ = try conflictFile(at: root, path: path, maximumBytes: maximumBytes)
+
+        let data = Data(result.utf8)
+        try validateConflictTextData(data, path: path, maximumBytes: maximumBytes)
+        let resultURL = try validatedConflictPath(path, root: root)
+        let permissions = (try? FileManager.default.attributesOfItem(atPath: resultURL.path)[.posixPermissions])
+
+        try data.write(to: resultURL, options: [.atomic])
+        if let permissions {
+            try? FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: resultURL.path)
+        }
+
+        try stage(at: root, paths: [path])
+        let resolvedSnapshot = try status(at: root)
+        guard !resolvedSnapshot.paths.contains(where: { $0.path == path && $0.kind == .conflicted }) else {
+            throw GitEngineError.invalidOutput("Git still reports \(path) as conflicted after staging the resolution.")
+        }
+        return resolvedSnapshot
+    }
+
+    private func validatedConflictPath(_ path: String, root: URL) throws -> URL {
+        guard !path.isEmpty, path != ".", !path.hasPrefix("/"), !path.contains("\0") else {
+            throw GitConflictWorkspaceError.invalidPath(path)
+        }
+        let candidate = root.appendingPathComponent(path, isDirectory: false).standardizedFileURL
+        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        guard candidate.path.hasPrefix(rootPath) else {
+            throw GitConflictWorkspaceError.invalidPath(path)
+        }
+        return candidate
+    }
+
+    private func conflictStageText(
+        stage: Int,
+        path: String,
+        root: URL,
+        maximumBytes: Int
+    ) throws -> String? {
+        let result = try runConflictGit(
+            ["-C", root.path, "show", ":\(stage):\(path)"]
+        )
+        if result.status != 0 {
+            return nil
+        }
+        try validateConflictTextData(result.stdout, path: path, maximumBytes: maximumBytes)
+        guard let text = String(data: result.stdout, encoding: .utf8) else {
+            throw GitConflictWorkspaceError.unsupportedBinary(path)
+        }
+        return text
+    }
+
+    private func validateConflictTextData(_ data: Data, path: String, maximumBytes: Int) throws {
+        let boundedMaximum = max(1, maximumBytes)
+        guard data.count <= boundedMaximum else {
+            throw GitConflictWorkspaceError.fileTooLarge(path)
+        }
+        guard !data.contains(0) else {
+            throw GitConflictWorkspaceError.unsupportedBinary(path)
+        }
+    }
+
+    private func runConflictGit(_ arguments: [String]) throws -> (status: Int32, stdout: Data, stderr: String) {
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            throw GitEngineError.executableMissing(executableURL.path)
+        }
+
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+
+        try process.run()
+        let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        return (
+            process.terminationStatus,
+            stdout,
+            String(data: stderrData, encoding: .utf8) ?? ""
+        )
+    }
+}

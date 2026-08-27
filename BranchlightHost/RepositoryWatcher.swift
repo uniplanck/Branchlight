@@ -1,3 +1,4 @@
+import BranchlightCore
 import CoreServices
 import Foundation
 
@@ -77,5 +78,239 @@ final class RepositoryWatcher: @unchecked Sendable {
         }
         debounceItem = item
         queue.asyncAfter(deadline: .now() + 0.35, execute: item)
+    }
+}
+
+// MARK: - Local AI provider bridge
+
+enum GitAILocalCommandError: LocalizedError, Sendable {
+    case notConfigured
+    case missingContext
+    case invalidExecutable(String)
+    case invalidArguments
+    case timedOut
+    case cancelled
+    case failed(status: Int32, stderr: String)
+    case outputTooLarge
+    case emptyOutput
+
+    var errorDescription: String? {
+        switch self {
+        case .notConfigured:
+            return "No local AI command provider is configured."
+        case .missingContext:
+            return "Refresh repository context before running the local AI provider."
+        case .invalidExecutable(let path):
+            return "The configured AI executable is not an absolute executable file: \(path)"
+        case .invalidArguments:
+            return "BRANCHLIGHT_AI_ARGUMENTS_JSON must be a JSON array of strings."
+        case .timedOut:
+            return "The local AI command exceeded its execution timeout."
+        case .cancelled:
+            return "The local AI command was cancelled."
+        case .failed(let status, let stderr):
+            return "The local AI command failed (\(status)): \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+        case .outputTooLarge:
+            return "The local AI command returned more output than Branchlight allows."
+        case .emptyOutput:
+            return "The local AI command returned no response."
+        }
+    }
+}
+
+struct GitAILocalCommandConfiguration: Sendable, Hashable {
+    let executableURL: URL
+    let arguments: [String]
+    let timeout: TimeInterval
+    let maximumOutputBytes: Int
+
+    init(
+        executableURL: URL,
+        arguments: [String] = [],
+        timeout: TimeInterval = 90,
+        maximumOutputBytes: Int = 1_048_576
+    ) throws {
+        let standardized = executableURL.standardizedFileURL
+        guard standardized.path.hasPrefix("/"),
+              FileManager.default.isExecutableFile(atPath: standardized.path) else {
+            throw GitAILocalCommandError.invalidExecutable(executableURL.path)
+        }
+        self.executableURL = standardized
+        self.arguments = arguments
+        self.timeout = min(max(timeout, 1), 600)
+        self.maximumOutputBytes = min(max(maximumOutputBytes, 1_024), 8 * 1_048_576)
+    }
+
+    static func fromEnvironment(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> GitAILocalCommandConfiguration {
+        guard let rawPath = environment["BRANCHLIGHT_AI_EXECUTABLE"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawPath.isEmpty else {
+            throw GitAILocalCommandError.notConfigured
+        }
+
+        let arguments: [String]
+        if let rawArguments = environment["BRANCHLIGHT_AI_ARGUMENTS_JSON"], !rawArguments.isEmpty {
+            guard let data = rawArguments.data(using: .utf8),
+                  let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+                throw GitAILocalCommandError.invalidArguments
+            }
+            arguments = decoded
+        } else {
+            arguments = []
+        }
+
+        let timeout = environment["BRANCHLIGHT_AI_TIMEOUT_SECONDS"].flatMap(TimeInterval.init) ?? 90
+        return try GitAILocalCommandConfiguration(
+            executableURL: URL(fileURLWithPath: rawPath),
+            arguments: arguments,
+            timeout: timeout
+        )
+    }
+}
+
+struct GitAILocalCommandProvider: GitAIProvider, Sendable {
+    let configuration: GitAILocalCommandConfiguration
+
+    var providerName: String {
+        "local-command:\(configuration.executableURL.lastPathComponent)"
+    }
+
+    init(configuration: GitAILocalCommandConfiguration) {
+        self.configuration = configuration
+    }
+
+    func perform(_ request: GitAIRequest) async throws -> GitAIResponse {
+        let prompt = GitAIPromptBuilder.prompt(for: request)
+        let configuration = configuration
+        let providerName = providerName
+
+        return try await Task.detached(priority: .userInitiated) {
+            let result = try Self.run(prompt: prompt, configuration: configuration)
+            return GitAIResponse(text: result, provider: providerName, model: nil)
+        }.value
+    }
+
+    private static func run(
+        prompt: String,
+        configuration: GitAILocalCommandConfiguration
+    ) throws -> String {
+        let fileManager = FileManager.default
+        let isolatedWorkingDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("Branchlight-AI-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(
+            at: isolatedWorkingDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? fileManager.removeItem(at: isolatedWorkingDirectory) }
+
+        let stdinURL = isolatedWorkingDirectory.appendingPathComponent("stdin.txt")
+        let stdoutURL = isolatedWorkingDirectory.appendingPathComponent("stdout.txt")
+        let stderrURL = isolatedWorkingDirectory.appendingPathComponent("stderr.txt")
+        try Data(prompt.utf8).write(to: stdinURL, options: .atomic)
+        guard fileManager.createFile(atPath: stdoutURL.path, contents: Data()),
+              fileManager.createFile(atPath: stderrURL.path, contents: Data()) else {
+            throw GitAILocalCommandError.emptyOutput
+        }
+
+        let stdinHandle = try FileHandle(forReadingFrom: stdinURL)
+        let stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
+        let stderrHandle = try FileHandle(forWritingTo: stderrURL)
+        defer {
+            try? stdinHandle.close()
+            try? stdoutHandle.close()
+            try? stderrHandle.close()
+        }
+
+        let process = Process()
+        process.executableURL = configuration.executableURL
+        process.arguments = configuration.arguments
+        process.currentDirectoryURL = isolatedWorkingDirectory
+        process.standardInput = stdinHandle
+        process.standardOutput = stdoutHandle
+        process.standardError = stderrHandle
+
+        let inherited = ProcessInfo.processInfo.environment
+        var environment: [String: String] = [:]
+        if let path = inherited["PATH"] { environment["PATH"] = path }
+        if let home = inherited["HOME"] { environment["HOME"] = home }
+        if let lang = inherited["LANG"] { environment["LANG"] = lang }
+        environment["TERM"] = "dumb"
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        environment["NO_COLOR"] = "1"
+        process.environment = environment
+
+        try process.run()
+        let deadline = Date().addingTimeInterval(configuration.timeout)
+        while process.isRunning {
+            if Task.isCancelled {
+                process.terminate()
+                process.waitUntilExit()
+                throw GitAILocalCommandError.cancelled
+            }
+            if Date() >= deadline {
+                process.terminate()
+                process.waitUntilExit()
+                throw GitAILocalCommandError.timedOut
+            }
+            if fileSize(at: stdoutURL, fileManager: fileManager) > configuration.maximumOutputBytes ||
+                fileSize(at: stderrURL, fileManager: fileManager) > configuration.maximumOutputBytes {
+                process.terminate()
+                process.waitUntilExit()
+                throw GitAILocalCommandError.outputTooLarge
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        try? stdoutHandle.synchronize()
+        try? stderrHandle.synchronize()
+        let stdout = try Data(contentsOf: stdoutURL)
+        let stderr = try Data(contentsOf: stderrURL)
+        guard stdout.count <= configuration.maximumOutputBytes,
+              stderr.count <= configuration.maximumOutputBytes else {
+            throw GitAILocalCommandError.outputTooLarge
+        }
+        guard process.terminationStatus == 0 else {
+            throw GitAILocalCommandError.failed(
+                status: process.terminationStatus,
+                stderr: String(data: stderr, encoding: .utf8) ?? ""
+            )
+        }
+
+        let response = (String(data: stdout, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !response.isEmpty else { throw GitAILocalCommandError.emptyOutput }
+        return response
+    }
+
+    private static func fileSize(at url: URL, fileManager: FileManager) -> Int {
+        let attributes = try? fileManager.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? NSNumber)?.intValue ?? 0
+    }
+}
+
+@MainActor
+extension GitAIWorkbenchModel {
+    var hasConfiguredLocalProvider: Bool {
+        (try? GitAILocalCommandConfiguration.fromEnvironment()) != nil
+    }
+
+    var configuredLocalProviderName: String? {
+        guard let configuration = try? GitAILocalCommandConfiguration.fromEnvironment() else { return nil }
+        return GitAILocalCommandProvider(configuration: configuration).providerName
+    }
+
+    func performConfiguredLocalProvider() async throws -> GitAIResponse {
+        guard let context else { throw GitAILocalCommandError.missingContext }
+        let configuration = try GitAILocalCommandConfiguration.fromEnvironment()
+        let provider = GitAILocalCommandProvider(configuration: configuration)
+        let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try await provider.perform(
+            GitAIRequest(
+                intent: intent,
+                context: context,
+                instruction: trimmed.isEmpty ? nil : trimmed
+            )
+        )
     }
 }

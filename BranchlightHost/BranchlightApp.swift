@@ -1,4 +1,5 @@
 import AppKit
+import BranchlightCore
 import Combine
 import SwiftUI
 
@@ -17,11 +18,15 @@ final class BranchlightAppDelegate: NSObject, NSApplicationDelegate {
 struct BranchlightApp: App {
     @NSApplicationDelegateAdaptor(BranchlightAppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
+    @StateObject private var githubModel = GitHubPanelModel()
+    @StateObject private var aiModel = GitAIWorkbenchModel()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(model)
+                .environmentObject(githubModel)
+                .accessibilityIdentifier("branchlight.main")
                 .frame(minWidth: 720, minHeight: 500)
                 .onAppear {
                     model.consumeFinderRequest()
@@ -31,5 +36,773 @@ struct BranchlightApp: App {
                 }
         }
         .windowResizability(.contentMinSize)
+        .commands {
+            BranchlightCommands(model: model)
+        }
+
+        Window("GitHub Live", id: "github-live") {
+            GitHubLiveView()
+                .environmentObject(model)
+                .environmentObject(githubModel)
+                .accessibilityIdentifier("branchlight.github-live")
+                .frame(minWidth: 760, minHeight: 560)
+        }
+        .defaultSize(width: 900, height: 680)
+
+        Window("AI Workbench", id: "ai-workbench") {
+            GitAIWorkbenchView()
+                .environmentObject(model)
+                .environmentObject(aiModel)
+                .accessibilityIdentifier("branchlight.ai-workbench")
+                .frame(minWidth: 760, minHeight: 580)
+        }
+        .defaultSize(width: 920, height: 720)
+    }
+}
+
+struct BranchlightCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+    @ObservedObject var model: AppModel
+
+    var body: some Commands {
+        CommandMenu("Branchlight") {
+            Button("Add Repository…") {
+                model.chooseRepository()
+            }
+            .keyboardShortcut("o", modifiers: [.command])
+
+            Button("Refresh Repository") {
+                Task { await model.refresh() }
+            }
+            .keyboardShortcut("r", modifiers: [.command])
+            .disabled(model.repositoryURL == nil || model.isRefreshing)
+
+            Divider()
+
+            Button("Changes") { model.requestedTab = 0 }
+                .keyboardShortcut("1", modifiers: [.command])
+                .disabled(model.repositoryURL == nil)
+            Button("Diff") { model.requestedTab = 1 }
+                .keyboardShortcut("2", modifiers: [.command])
+                .disabled(model.repositoryURL == nil)
+            Button("History") { model.requestedTab = 2 }
+                .keyboardShortcut("3", modifiers: [.command])
+                .disabled(model.repositoryURL == nil)
+            Button("Branches") { model.requestedTab = 3 }
+                .keyboardShortcut("4", modifiers: [.command])
+                .disabled(model.repositoryURL == nil)
+            Button("Conflicts") { model.requestedTab = 4 }
+                .keyboardShortcut("5", modifiers: [.command])
+                .disabled(model.repositoryURL == nil)
+
+            Divider()
+
+            Button("GitHub Live") {
+                openWindow(id: "github-live")
+            }
+            .keyboardShortcut("g", modifiers: [.command, .shift])
+
+            Button("AI Workbench") {
+                openWindow(id: "ai-workbench")
+            }
+            .keyboardShortcut("a", modifiers: [.command, .shift])
+            .disabled(model.repositoryURL == nil)
+
+            Divider()
+
+            Button("Copy Agent Context") {
+                Task { @MainActor in
+                    guard let repositoryURL = model.repositoryURL else { return }
+                    do {
+                        let context = try await InProcessGitService().agentContextMarkdown(at: repositoryURL)
+                        let pasteboard = NSPasteboard.general
+                        pasteboard.clearContents()
+                        pasteboard.setString(context, forType: .string)
+                        model.errorMessage = nil
+                        model.lastOperation = "Agent context copied"
+                    } catch {
+                        model.errorMessage = "Agent context export failed: \(error.localizedDescription)"
+                    }
+                }
+            }
+            .keyboardShortcut("c", modifiers: [.command, .option])
+            .disabled(model.repositoryURL == nil)
+        }
+    }
+}
+
+@MainActor
+final class GitHubPanelModel: ObservableObject {
+    @Published private(set) var remoteRepository: GitRemoteRepository?
+    @Published private(set) var repositorySummary: RemoteRepositorySummary?
+    @Published private(set) var pullRequests: [RemotePullRequest] = []
+    @Published private(set) var checkRuns: [RemoteCheckRun] = []
+    @Published private(set) var reviews: [RemoteReview] = []
+    @Published private(set) var reviewedPullRequestNumber: Int?
+    @Published private(set) var deviceAuthorization: GitHubDeviceAuthorization?
+    @Published private(set) var isConnected = false
+    @Published private(set) var isLoading = false
+    @Published private(set) var errorMessage: String?
+
+    private let discovery: GitRemoteDiscovery
+    private let provider: any RemoteProvider
+    private let authentication: GitHubAuthenticationController
+    private var authenticationTask: Task<Void, Never>?
+
+    init(
+        discovery: GitRemoteDiscovery = GitRemoteDiscovery(),
+        provider: any RemoteProvider = GitHubProvider(),
+        authentication: GitHubAuthenticationController = GitHubAuthenticationController()
+    ) {
+        self.discovery = discovery
+        self.provider = provider
+        self.authentication = authentication
+        Task { [weak self] in
+            guard let self else { return }
+            self.isConnected = await authentication.isConnected()
+        }
+    }
+
+    deinit {
+        authenticationTask?.cancel()
+    }
+
+    func refresh(repositoryURL: URL?, ref: String?) async {
+        guard let repositoryURL else {
+            clearRepositoryState()
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+        isConnected = await authentication.isConnected()
+
+        do {
+            guard let remote = try await discovery.origin(at: repositoryURL) else {
+                clearRemoteData()
+                errorMessage = "This repository has no origin remote."
+                isLoading = false
+                return
+            }
+            remoteRepository = remote
+
+            guard remote.provider == .github else {
+                repositorySummary = nil
+                pullRequests = []
+                checkRuns = []
+                reviews = []
+                reviewedPullRequestNumber = nil
+                errorMessage = "The origin remote is not a GitHub repository."
+                isLoading = false
+                return
+            }
+
+            async let summaryRequest = provider.repositorySummary(for: remote)
+            async let pullRequestRequest = provider.pullRequests(for: remote, state: .open)
+
+            let summary = try await summaryRequest
+            let pullRequests = try await pullRequestRequest
+            let checks: [RemoteCheckRun]
+            if let ref = ref?.trimmingCharacters(in: .whitespacesAndNewlines), !ref.isEmpty {
+                checks = try await provider.checkRuns(for: remote, ref: ref)
+            } else {
+                checks = []
+            }
+
+            repositorySummary = summary
+            self.pullRequests = pullRequests
+            checkRuns = checks
+            reviews = []
+            reviewedPullRequestNumber = nil
+            isLoading = false
+        } catch {
+            errorMessage = error.localizedDescription
+            isLoading = false
+        }
+    }
+
+    func loadReviews(for pullRequestNumber: Int) async {
+        guard let remoteRepository, remoteRepository.provider == .github else { return }
+        isLoading = true
+        errorMessage = nil
+        do {
+            reviews = try await provider.reviews(
+                for: remoteRepository,
+                pullRequestNumber: pullRequestNumber
+            )
+            reviewedPullRequestNumber = pullRequestNumber
+            isLoading = false
+        } catch {
+            errorMessage = error.localizedDescription
+            isLoading = false
+        }
+    }
+
+    func beginAuthentication() async {
+        authenticationTask?.cancel()
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            let (configuration, authorization) = try await authentication.begin()
+            deviceAuthorization = authorization
+            isLoading = false
+
+            authenticationTask = Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await authentication.complete(
+                        configuration: configuration,
+                        authorization: authorization
+                    )
+                    self.isConnected = true
+                    self.deviceAuthorization = nil
+                    self.errorMessage = nil
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self.errorMessage = error.localizedDescription
+                    self.deviceAuthorization = nil
+                }
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            isLoading = false
+        }
+    }
+
+    func disconnect() async {
+        authenticationTask?.cancel()
+        authenticationTask = nil
+        do {
+            try await authentication.disconnect()
+            isConnected = false
+            deviceAuthorization = nil
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func clearRepositoryState() {
+        remoteRepository = nil
+        clearRemoteData()
+        errorMessage = nil
+        isLoading = false
+    }
+
+    private func clearRemoteData() {
+        repositorySummary = nil
+        pullRequests = []
+        checkRuns = []
+        reviews = []
+        reviewedPullRequestNumber = nil
+    }
+}
+
+@MainActor
+final class GitAIWorkbenchModel: ObservableObject {
+    @Published var intent: GitAIIntent = .explainDiff
+    @Published var instruction = ""
+    @Published private(set) var context: GitAIContext?
+    @Published private(set) var prompt = ""
+    @Published private(set) var responseText = ""
+    @Published private(set) var responseProvider: String?
+    @Published private(set) var isLoading = false
+    @Published private(set) var isRunningProvider = false
+    @Published private(set) var errorMessage: String?
+
+    private let service: InProcessGitService
+
+    init(service: InProcessGitService = InProcessGitService()) {
+        self.service = service
+    }
+
+    func refresh(repositoryURL: URL?) async {
+        guard let repositoryURL else {
+            context = nil
+            prompt = ""
+            responseText = ""
+            responseProvider = nil
+            errorMessage = nil
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+        do {
+            let context = try await service.intelligentContext(at: repositoryURL)
+            self.context = context
+            rebuildPrompt()
+            isLoading = false
+        } catch {
+            errorMessage = error.localizedDescription
+            isLoading = false
+        }
+    }
+
+    func rebuildPrompt() {
+        guard let context else {
+            prompt = ""
+            return
+        }
+        let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        prompt = GitAIPromptBuilder.prompt(
+            for: GitAIRequest(
+                intent: intent,
+                context: context,
+                instruction: trimmed.isEmpty ? nil : trimmed
+            )
+        )
+    }
+
+    func copyPrompt() {
+        guard !prompt.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(prompt, forType: .string)
+    }
+
+    func runConfiguredLocalProvider() async {
+        guard !isRunningProvider else { return }
+        isRunningProvider = true
+        errorMessage = nil
+        responseText = ""
+        responseProvider = nil
+        defer { isRunningProvider = false }
+
+        do {
+            let response = try await performConfiguredLocalProvider()
+            responseText = response.text
+            responseProvider = response.provider
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func copyResponse() {
+        guard !responseText.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(responseText, forType: .string)
+    }
+}
+
+struct GitHubLiveView: View {
+    @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var github: GitHubPanelModel
+    @State private var selectedPullRequestNumber: Int?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+
+            if let authorization = github.deviceAuthorization {
+                deviceAuthorizationCard(authorization)
+            }
+
+            if let error = github.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+
+            if let summary = github.repositorySummary {
+                repositoryCard(summary)
+            }
+
+            HSplitView {
+                pullRequestsPane
+                    .frame(minWidth: 320)
+                detailPane
+                    .frame(minWidth: 360)
+            }
+        }
+        .padding(18)
+        .task {
+            await refresh()
+        }
+        .onChange(of: model.repositoryURL) { _ in
+            Task { await refresh() }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("GitHub Live")
+                    .font(.title2.weight(.semibold))
+                Text(github.remoteRepository?.fullName ?? "Remote repository intelligence")
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            if github.isConnected {
+                Label("Connected", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.secondary)
+                Button("Disconnect") {
+                    Task { await github.disconnect() }
+                }
+            } else {
+                Button("Connect GitHub…") {
+                    Task { await github.beginAuthentication() }
+                }
+            }
+
+            Button {
+                Task { await refresh() }
+            } label: {
+                if github.isLoading {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+            }
+            .accessibilityLabel("Refresh GitHub data")
+            .disabled(github.isLoading || model.repositoryURL == nil)
+        }
+    }
+
+    private func deviceAuthorizationCard(_ authorization: GitHubDeviceAuthorization) -> some View {
+        GroupBox("GitHub Device Authorization") {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Enter this code on GitHub")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(authorization.userCode)
+                        .font(.system(.title3, design: .monospaced).weight(.semibold))
+                        .textSelection(.enabled)
+                        .accessibilityLabel("GitHub device authorization code \(authorization.userCode)")
+                }
+                Spacer()
+                Link("Open GitHub", destination: authorization.verificationURL)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func repositoryCard(_ summary: RemoteRepositorySummary) -> some View {
+        GroupBox {
+            HStack(spacing: 18) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(summary.fullName)
+                        .font(.headline)
+                    Text("Default branch: \(summary.defaultBranch)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(summary.isPrivate ? "Private" : "Public")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let url = URL(string: summary.webURL) {
+                    Link("Open Repository", destination: url)
+                }
+            }
+        }
+    }
+
+    private var pullRequestsPane: some View {
+        GroupBox("Open Pull Requests (\(github.pullRequests.count))") {
+            if github.pullRequests.isEmpty {
+                Text("No open pull requests")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(github.pullRequests) { pullRequest in
+                    Button {
+                        selectedPullRequestNumber = pullRequest.number
+                        Task { await github.loadReviews(for: pullRequest.number) }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text("#\(pullRequest.number)")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                Text(pullRequest.title)
+                                    .lineLimit(1)
+                                if pullRequest.isDraft {
+                                    Text("Draft")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Text("\(pullRequest.headBranch) → \(pullRequest.baseBranch) · \(pullRequest.author)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .accessibilityLabel(
+                        "Pull request \(pullRequest.number), \(pullRequest.title), \(pullRequest.headBranch) to \(pullRequest.baseBranch), by \(pullRequest.author)"
+                    )
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var detailPane: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            GroupBox("Checks for current branch") {
+                if github.checkRuns.isEmpty {
+                    Text("No check runs found")
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 7) {
+                        ForEach(github.checkRuns) { check in
+                            HStack {
+                                Image(systemName: checkSymbol(check))
+                                Text(check.name)
+                                Spacer()
+                                Text(check.conclusion ?? check.status)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+
+            GroupBox(selectedPullRequestNumber.map { "Reviews for #\($0)" } ?? "Reviews") {
+                if let selectedPullRequestNumber,
+                   let pullRequest = github.pullRequests.first(where: { $0.number == selectedPullRequestNumber }) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(pullRequest.title)
+                            .font(.headline)
+                        if let url = URL(string: pullRequest.webURL) {
+                            Link("Open Pull Request", destination: url)
+                        }
+                        Divider()
+                        if github.reviewedPullRequestNumber != selectedPullRequestNumber {
+                            ProgressView()
+                                .controlSize(.small)
+                                .accessibilityLabel("Loading reviews")
+                        } else if github.reviews.isEmpty {
+                            Text("No submitted reviews")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(github.reviews) { review in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(review.author) · \(review.state)")
+                                        .font(.callout.weight(.medium))
+                                    if let body = review.body, !body.isEmpty {
+                                        Text(body)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(3)
+                                    }
+                                }
+                                .accessibilityElement(children: .combine)
+                            }
+                        }
+                    }
+                } else {
+                    Text("Select a pull request to inspect reviews.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+        }
+    }
+
+    private func refresh() async {
+        await github.refresh(
+            repositoryURL: model.repositoryURL,
+            ref: model.snapshot?.branch
+        )
+        if let selectedPullRequestNumber,
+           github.pullRequests.contains(where: { $0.number == selectedPullRequestNumber }) {
+            await github.loadReviews(for: selectedPullRequestNumber)
+        } else {
+            selectedPullRequestNumber = nil
+        }
+    }
+
+    private func checkSymbol(_ check: RemoteCheckRun) -> String {
+        switch check.conclusion?.lowercased() {
+        case "success": return "checkmark.circle.fill"
+        case "failure", "cancelled", "timed_out": return "xmark.circle.fill"
+        case nil: return "clock"
+        default: return "circle"
+        }
+    }
+}
+
+struct GitAIWorkbenchView: View {
+    @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var ai: GitAIWorkbenchModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("AI Workbench")
+                        .font(.title2.weight(.semibold))
+                    Text("Preview the exact sanitized context before it leaves Branchlight.")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Refresh Context") {
+                    Task { await ai.refresh(repositoryURL: model.repositoryURL) }
+                }
+                .disabled(model.repositoryURL == nil || ai.isLoading || ai.isRunningProvider)
+                Button("Copy Prompt") { ai.copyPrompt() }
+                    .disabled(ai.prompt.isEmpty)
+            }
+
+            HStack(spacing: 12) {
+                Picker("Task", selection: $ai.intent) {
+                    ForEach(GitAIIntent.allCases, id: \.self) { intent in
+                        Text(intentTitle(intent)).tag(intent)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel("AI task")
+                .onChange(of: ai.intent) { _ in ai.rebuildPrompt() }
+
+                TextField("Optional instruction", text: $ai.instruction)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Optional AI instruction")
+                    .onSubmit { ai.rebuildPrompt() }
+                    .onChange(of: ai.instruction) { _ in ai.rebuildPrompt() }
+            }
+
+            if let context = ai.context {
+                HStack(spacing: 14) {
+                    Label(context.branch, systemImage: "point.3.connected.trianglepath.dotted")
+                    if let tracking = context.tracking {
+                        Text(tracking.summary)
+                    }
+                    Text("\(context.paths.count) visible paths")
+                    if !context.redactedPaths.isEmpty {
+                        Label("\(context.redactedPaths.count) redacted", systemImage: "eye.slash")
+                    }
+                    if context.wasTruncated {
+                        Label("truncated", systemImage: "scissors")
+                    }
+                    Spacer()
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
+            }
+
+            HStack(spacing: 10) {
+                if let providerName = ai.configuredLocalProviderName {
+                    Label(providerName, systemImage: "terminal")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label("Local provider not configured", systemImage: "terminal")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    Task { await ai.runConfiguredLocalProvider() }
+                } label: {
+                    if ai.isRunningProvider {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Running…")
+                        }
+                    } else {
+                        Label("Run Local Provider", systemImage: "play.fill")
+                    }
+                }
+                .accessibilityLabel(ai.isRunningProvider ? "Local AI provider running" : "Run local AI provider")
+                .disabled(
+                    !ai.hasConfiguredLocalProvider ||
+                    ai.context == nil ||
+                    ai.isLoading ||
+                    ai.isRunningProvider
+                )
+            }
+
+            if let error = ai.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("AI Workbench error: \(error)")
+            }
+
+            VSplitView {
+                GroupBox("Generated prompt") {
+                    if ai.isLoading {
+                        ProgressView()
+                            .accessibilityLabel("Loading sanitized repository context")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if ai.prompt.isEmpty {
+                        Text("Choose a repository and refresh its context.")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ScrollView([.vertical, .horizontal]) {
+                            Text(ai.prompt)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .accessibilityLabel("Generated AI prompt")
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                                .padding(8)
+                        }
+                    }
+                }
+                .frame(minHeight: 220)
+
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Provider response")
+                                .font(.headline)
+                            if let provider = ai.responseProvider {
+                                Text(provider)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Copy Response") { ai.copyResponse() }
+                                .disabled(ai.responseText.isEmpty)
+                        }
+
+                        if ai.responseText.isEmpty {
+                            Text("Branchlight never applies AI output automatically. Review a provider response here before using it anywhere else.")
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        } else {
+                            ScrollView([.vertical, .horizontal]) {
+                                Text(ai.responseText)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .accessibilityLabel("AI provider response")
+                                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                                    .padding(8)
+                            }
+                        }
+                    }
+                }
+                .frame(minHeight: 180)
+            }
+        }
+        .padding(18)
+        .task {
+            await ai.refresh(repositoryURL: model.repositoryURL)
+        }
+        .onChange(of: model.repositoryURL) { _ in
+            Task { await ai.refresh(repositoryURL: model.repositoryURL) }
+        }
+    }
+
+    private func intentTitle(_ intent: GitAIIntent) -> String {
+        switch intent {
+        case .explainDiff: return "Explain"
+        case .reviewChanges: return "Review"
+        case .composeCommitMessage: return "Commit"
+        case .assistConflict: return "Conflict"
+        }
     }
 }

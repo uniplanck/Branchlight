@@ -9,6 +9,10 @@ settings:
     CODE_SIGN_STYLE: Automatic
     MACOSX_DEPLOYMENT_TARGET: "13.0"
 
+configFiles:
+  Debug: Config/Branchlight.xcconfig
+  Release: Config/Branchlight.xcconfig
+
 targets:
   BranchlightCore:
     type: framework
@@ -34,15 +38,19 @@ targets:
         CFBundleShortVersionString: "0.1.0"
         CFBundleVersion: "1"
         NSPrincipalClass: NSApplication
+        BranchlightGitHubClientID: $(BRANCHLIGHT_GITHUB_CLIENT_ID)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight
         PRODUCT_NAME: Branchlight
         CODE_SIGN_ENTITLEMENTS: BranchlightHost/BranchlightHost.entitlements
+        REGISTER_APP_GROUPS: YES
+        ENABLE_HARDENED_RUNTIME: YES
     dependencies:
       - target: BranchlightCore
       - target: BranchlightFinderExtension
         embed: true
+      - target: BranchlightGitService
 
   BranchlightFinderExtension:
     type: app-extension
@@ -64,10 +72,36 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight.Extension
         PRODUCT_NAME: BranchlightFinderExtension
         CODE_SIGN_ENTITLEMENTS: BranchlightFinderExtension/BranchlightFinderExtension.entitlements
+        REGISTER_APP_GROUPS: YES
         APPLICATION_EXTENSION_API_ONLY: YES
+        ENABLE_HARDENED_RUNTIME: YES
         SKIP_INSTALL: YES
     dependencies:
       - target: BranchlightCore
+
+  BranchlightGitService:
+    type: xpc-service
+    platform: macOS
+    sources:
+      - path: BranchlightXPC
+    info:
+      path: BranchlightXPC/Info.plist
+      properties:
+        CFBundleDisplayName: Branchlight Git Service
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        XPCService:
+          ServiceType: Application
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight.GitService
+        PRODUCT_NAME: BranchlightGitService
+        ENABLE_HARDENED_RUNTIME: YES
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks"
+        SKIP_INSTALL: YES
+    dependencies:
+      - target: BranchlightCore
+        embed: true
 
   BranchlightCoreTests:
     type: bundle.unit-test
@@ -81,12 +115,29 @@ targets:
     dependencies:
       - target: BranchlightCore
 
+  BranchlightXPCIntegrationTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: BranchlightXPCIntegrationTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.Branchlight.XPCIntegrationTests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Branchlight.app/Contents/MacOS/Branchlight
+        BUNDLE_LOADER: $(TEST_HOST)
+    dependencies:
+      - target: Branchlight
+      - target: BranchlightCore
+
 schemes:
   Branchlight:
     build:
       targets:
         Branchlight: all
         BranchlightCoreTests: [test]
+        BranchlightXPCIntegrationTests: [test]
     test:
       targets:
         - BranchlightCoreTests
+        - BranchlightXPCIntegrationTests

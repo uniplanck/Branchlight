@@ -9,6 +9,9 @@ public enum FinderIntentAction: String, Codable, Sendable {
 }
 
 public struct FinderIntent: Codable, Sendable, Equatable {
+    public static let defaultMaximumAge: TimeInterval = 5 * 60
+    public static let maximumFutureClockSkew: TimeInterval = 60
+
     public let action: FinderIntentAction
     public let repositoryRoot: String
     public let paths: [String]
@@ -25,23 +28,42 @@ public struct FinderIntent: Codable, Sendable, Equatable {
         self.paths = paths
         self.requestedAt = requestedAt
     }
+
+    public func isFresh(
+        at now: Date = Date(),
+        maximumAge: TimeInterval = FinderIntent.defaultMaximumAge
+    ) -> Bool {
+        let age = now.timeIntervalSince(requestedAt)
+        return age >= -Self.maximumFutureClockSkew && age <= max(0, maximumAge)
+    }
 }
 
 public struct StatusCacheEnvelope: Codable, Sendable {
     public var revision: Int
     public var monitoredRoots: [String]
     public var snapshots: [String: GitStatusSnapshot]
+    public var repositoryIntelligence: [String: GitRepositoryIntelligence]?
 
-    public init(revision: Int = 0, monitoredRoots: [String] = [], snapshots: [String: GitStatusSnapshot] = [:]) {
+    public init(
+        revision: Int = 0,
+        monitoredRoots: [String] = [],
+        snapshots: [String: GitStatusSnapshot] = [:],
+        repositoryIntelligence: [String: GitRepositoryIntelligence]? = nil
+    ) {
         self.revision = revision
         self.monitoredRoots = monitoredRoots
         self.snapshots = snapshots
+        self.repositoryIntelligence = repositoryIntelligence
     }
 
     public func snapshot(containing absolutePath: String) -> GitStatusSnapshot? {
         snapshots.values
             .filter { absolutePath == $0.repositoryRoot || absolutePath.hasPrefix($0.repositoryRoot + "/") }
             .max { $0.repositoryRoot.count < $1.repositoryRoot.count }
+    }
+
+    public func intelligence(forRepositoryRoot repositoryRoot: String) -> GitRepositoryIntelligence? {
+        repositoryIntelligence?[repositoryRoot]
     }
 
     public func statusKind(forAbsolutePath absolutePath: String) -> GitStatusKind {
@@ -95,11 +117,24 @@ public enum FinderIntegrationCompatibility {
 
 public enum SharedStatusNotifications {
     public static let cacheChanged = CFNotificationName("com.uniplanck.branchlight.cache.changed" as CFString)
+    public static let finderRequestChanged = CFNotificationName(
+        "com.uniplanck.branchlight.finder-request.changed" as CFString
+    )
 
     public static func postCacheChanged() {
         CFNotificationCenterPostNotification(
             CFNotificationCenterGetDarwinNotifyCenter(),
             cacheChanged,
+            nil,
+            nil,
+            true
+        )
+    }
+
+    public static func postFinderRequestChanged() {
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            finderRequestChanged,
             nil,
             nil,
             true
@@ -116,6 +151,7 @@ public final class SharedStatusCache: @unchecked Sendable {
     private static let envelopeFilename = "status-cache-envelope-v1.json"
     private static let pendingOpenPathFilename = "pending-finder-open-path-v1.json"
     private static let pendingFinderIntentFilename = "pending-finder-intent-v1.json"
+    private static let retainedCorruptBackupCount = 3
 
     private let storageDirectoryURL: URL
     private let legacyPreferencesURL: URL?
@@ -157,7 +193,7 @@ public final class SharedStatusCache: @unchecked Sendable {
 
     public func load() -> StatusCacheEnvelope {
         withLock {
-            if let envelope: StatusCacheEnvelope = readJSON(from: envelopeURL) {
+            if let envelope: StatusCacheEnvelope = readJSONOrQuarantine(from: envelopeURL) {
                 return envelope
             }
 
@@ -179,14 +215,19 @@ public final class SharedStatusCache: @unchecked Sendable {
     }
 
     public func setPendingOpenPath(_ path: String) {
-        try? withLock {
-            try writeJSON(path, to: pendingOpenPathURL)
+        do {
+            try withLock {
+                try writeJSON(path, to: pendingOpenPathURL)
+            }
+            SharedStatusNotifications.postFinderRequestChanged()
+        } catch {
+            return
         }
     }
 
     public func consumePendingOpenPath() -> String? {
         withLock {
-            if let path: String = readJSON(from: pendingOpenPathURL) {
+            if let path: String = readJSONOrQuarantine(from: pendingOpenPathURL) {
                 try? fileManager.removeItem(at: pendingOpenPathURL)
                 return path
             }
@@ -204,13 +245,17 @@ public final class SharedStatusCache: @unchecked Sendable {
         try withLock {
             try writeJSON(intent, to: pendingFinderIntentURL)
         }
+        SharedStatusNotifications.postFinderRequestChanged()
     }
 
-    public func consumePendingFinderIntent() -> FinderIntent? {
+    public func consumePendingFinderIntent(
+        now: Date = Date(),
+        maximumAge: TimeInterval = FinderIntent.defaultMaximumAge
+    ) -> FinderIntent? {
         withLock {
-            if let intent: FinderIntent = readJSON(from: pendingFinderIntentURL) {
+            if let intent: FinderIntent = readJSONOrQuarantine(from: pendingFinderIntentURL) {
                 try? fileManager.removeItem(at: pendingFinderIntentURL)
-                return intent
+                return intent.isFresh(at: now, maximumAge: maximumAge) ? intent : nil
             }
 
             guard !legacyValueWasConsumed(forKey: Self.pendingFinderIntentKey),
@@ -219,7 +264,7 @@ public final class SharedStatusCache: @unchecked Sendable {
                 return nil
             }
             markLegacyValueConsumed(forKey: Self.pendingFinderIntentKey)
-            return intent
+            return intent.isFresh(at: now, maximumAge: maximumAge) ? intent : nil
         }
     }
 
@@ -228,6 +273,28 @@ public final class SharedStatusCache: @unchecked Sendable {
             var envelope = readEnvelopeUnlocked()
             envelope.revision += 1
             envelope.snapshots[snapshot.repositoryRoot] = snapshot
+            if !envelope.monitoredRoots.contains(snapshot.repositoryRoot) {
+                envelope.monitoredRoots.append(snapshot.repositoryRoot)
+                envelope.monitoredRoots.sort()
+            }
+            try writeJSON(envelope, to: envelopeURL)
+            return envelope
+        }
+        SharedStatusNotifications.postCacheChanged()
+        return envelope
+    }
+
+    public func replaceRepositoryState(
+        snapshot: GitStatusSnapshot,
+        intelligence: GitRepositoryIntelligence
+    ) throws -> StatusCacheEnvelope {
+        let envelope = try withLock { () throws -> StatusCacheEnvelope in
+            var envelope = readEnvelopeUnlocked()
+            envelope.revision += 1
+            envelope.snapshots[snapshot.repositoryRoot] = snapshot
+            var intelligenceByRoot = envelope.repositoryIntelligence ?? [:]
+            intelligenceByRoot[snapshot.repositoryRoot] = intelligence
+            envelope.repositoryIntelligence = intelligenceByRoot
             if !envelope.monitoredRoots.contains(snapshot.repositoryRoot) {
                 envelope.monitoredRoots.append(snapshot.repositoryRoot)
                 envelope.monitoredRoots.sort()
@@ -264,7 +331,7 @@ public final class SharedStatusCache: @unchecked Sendable {
     }
 
     private func readEnvelopeUnlocked() -> StatusCacheEnvelope {
-        if let envelope: StatusCacheEnvelope = readJSON(from: envelopeURL) {
+        if let envelope: StatusCacheEnvelope = readJSONOrQuarantine(from: envelopeURL) {
             return envelope
         }
         if let legacyData = legacyData(forKey: Self.envelopeKey),
@@ -274,9 +341,47 @@ public final class SharedStatusCache: @unchecked Sendable {
         return StatusCacheEnvelope()
     }
 
-    private func readJSON<T: Decodable>(from url: URL) -> T? {
+    private func readJSONOrQuarantine<T: Decodable>(from url: URL) -> T? {
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? decoder.decode(T.self, from: data)
+        if let decoded = try? decoder.decode(T.self, from: data) {
+            return decoded
+        }
+
+        quarantineCorruptFile(at: url)
+        return nil
+    }
+
+    private func quarantineCorruptFile(at url: URL) {
+        let prefix = url.lastPathComponent + ".corrupt-"
+        let quarantineURL = storageDirectoryURL.appendingPathComponent(
+            prefix + UUID().uuidString,
+            isDirectory: false
+        )
+        guard (try? fileManager.moveItem(at: url, to: quarantineURL)) != nil else { return }
+        pruneCorruptBackups(prefix: prefix)
+    }
+
+    private func pruneCorruptBackups(prefix: String) {
+        guard let urls = try? fileManager.contentsOfDirectory(
+            at: storageDirectoryURL,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        let backups = urls
+            .filter { $0.lastPathComponent.hasPrefix(prefix) }
+            .map { url in
+                let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return (url, date)
+            }
+            .sorted { $0.1 > $1.1 }
+
+        for backup in backups.dropFirst(Self.retainedCorruptBackupCount) {
+            try? fileManager.removeItem(at: backup.0)
+        }
     }
 
     private func writeJSON<T: Encodable>(_ value: T, to url: URL) throws {

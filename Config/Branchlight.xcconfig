@@ -1,0 +1,17 @@
+// Branchlight shared build configuration.
+//
+// Do not commit a personal Team ID. Local development signing belongs in
+// Config/Branchlight.local.xcconfig, which is intentionally gitignored.
+//
+// XcodeGen regenerates Branchlight.xcodeproj from project.yml, so keeping the
+// Team selection only in the generated project is not durable.
+
+CODE_SIGN_STYLE = Automatic
+REGISTER_APP_GROUPS = YES
+
+#include? "Branchlight.local.xcconfig"
+
+// Local GitHub OAuth client configuration. Client IDs are not secrets, but the
+// per-machine file keeps contributor setup independent from the canonical project.
+BRANCHLIGHT_GITHUB_CLIENT_ID =
+#include? "Branchlight.oauth.local.xcconfig"

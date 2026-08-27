@@ -1,4 +1,5 @@
 import BranchlightCore
+import Foundation
 import XCTest
 
 final class GitDiffParserTests: XCTestCase {
@@ -87,5 +88,438 @@ final class GitDiffParserTests: XCTestCase {
         XCTAssertThrowsError(
             try GitPatchBuilder.patch(for: file, hunk: hunk, selectedChangedLineOrdinals: [])
         )
+    }
+}
+
+final class GitConflictWorkspaceTests: XCTestCase {
+    private let engine = SystemGitEngine()
+
+    func testLoadsBaseOursTheirsAndWorkingResultFromActiveConflict() throws {
+        let fixture = try makeConflictedFixture(prefix: "BranchlightConflictWorkspace")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let conflict = try engine.conflictFile(at: fixture.repository, path: "tracked.txt")
+        XCTAssertEqual(conflict.path, "tracked.txt")
+        XCTAssertEqual(conflict.base, "base\n")
+        XCTAssertEqual(conflict.ours, "ours\n")
+        XCTAssertEqual(conflict.theirs, "theirs\n")
+        XCTAssertTrue(conflict.result?.contains("<<<<<<<") == true)
+        XCTAssertTrue(conflict.result?.contains("ours") == true)
+        XCTAssertTrue(conflict.result?.contains("theirs") == true)
+    }
+
+    func testResolveConflictWritesStagesAndAllowsMergeContinue() throws {
+        let fixture = try makeConflictedFixture(prefix: "BranchlightConflictResolve")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let snapshot = try engine.resolveConflict(
+            at: fixture.repository,
+            path: "tracked.txt",
+            result: "resolved\n"
+        )
+        let tracked = try XCTUnwrap(snapshot.paths.first(where: { $0.path == "tracked.txt" }))
+        XCTAssertNotEqual(tracked.kind, .conflicted)
+        XCTAssertTrue(tracked.isStaged)
+        XCTAssertEqual(
+            try String(contentsOf: fixture.repository.appendingPathComponent("tracked.txt"), encoding: .utf8),
+            "resolved\n"
+        )
+
+        _ = try engine.continueMerge(at: fixture.repository)
+        XCTAssertTrue(try engine.status(at: fixture.repository).isClean)
+        XCTAssertEqual(
+            try String(contentsOf: fixture.repository.appendingPathComponent("tracked.txt"), encoding: .utf8),
+            "resolved\n"
+        )
+    }
+
+    func testServiceResolutionStagesThroughCoordinatorJournal() async throws {
+        let fixture = try makeConflictedFixture(prefix: "BranchlightConflictRuntime")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let service = InProcessGitService()
+        let conflict = try await service.conflictFile(at: fixture.repository, path: "tracked.txt")
+        XCTAssertEqual(conflict.base, "base\n")
+        XCTAssertEqual(conflict.ours, "ours\n")
+        XCTAssertEqual(conflict.theirs, "theirs\n")
+
+        let snapshot = try await service.resolveConflict(
+            at: fixture.repository,
+            path: "tracked.txt",
+            result: "runtime resolved\n"
+        )
+        XCTAssertFalse(snapshot.paths.contains(where: { $0.path == "tracked.txt" && $0.kind == .conflicted }))
+
+        let journal = await service.recentOperations(limit: 2)
+        let stageRecord = try XCTUnwrap(journal.first(where: { $0.descriptor?.intent == .stage }))
+        XCTAssertEqual(stageRecord.state, .succeeded)
+        XCTAssertEqual(stageRecord.descriptor?.affectedPaths, ["tracked.txt"])
+        XCTAssertEqual(stageRecord.preCheckpoint?.operationMode, .merging)
+        XCTAssertEqual(stageRecord.postCheckpoint?.operationMode, .merging)
+
+        _ = try await service.continueMerge(at: fixture.repository)
+        XCTAssertTrue(try engine.status(at: fixture.repository).isClean)
+        XCTAssertEqual(
+            try String(contentsOf: fixture.repository.appendingPathComponent("tracked.txt"), encoding: .utf8),
+            "runtime resolved\n"
+        )
+    }
+
+    func testRejectsPathThatIsNotCurrentlyConflicted() throws {
+        let fixture = try makeFixture(prefix: "BranchlightConflictReject")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertThrowsError(try engine.conflictFile(at: fixture.repository, path: "tracked.txt")) { error in
+            guard case GitConflictWorkspaceError.notConflicted("tracked.txt") = error else {
+                return XCTFail("Expected notConflicted, got \(error)")
+            }
+        }
+    }
+
+    private func makeConflictedFixture(prefix: String) throws -> (root: URL, repository: URL) {
+        let fixture = try makeFixture(prefix: prefix)
+
+        try runGit(["checkout", "-b", "side"], at: fixture.repository)
+        try "theirs\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "side change"], at: fixture.repository)
+
+        try runGit(["checkout", "main"], at: fixture.repository)
+        try "ours\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "main change"], at: fixture.repository)
+
+        guard try runGitAllowingFailure(["merge", "side"], at: fixture.repository) != 0 else {
+            throw NSError(domain: "GitConflictWorkspaceTests.Git", code: 99)
+        }
+        return fixture
+    }
+
+    private func makeFixture(prefix: String) throws -> (root: URL, repository: URL) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
+        let repository = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try runGit(["init", "-b", "main"], at: repository)
+        try runGit(["config", "user.email", "branchlight-conflict@example.invalid"], at: repository)
+        try runGit(["config", "user.name", "Branchlight Conflict Tests"], at: repository)
+        try "base\n".write(
+            to: repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: repository)
+        try runGit(["commit", "-m", "initial"], at: repository)
+        return (root, repository)
+    }
+
+    private func runGit(_ arguments: [String], at directory: URL) throws {
+        let status = try runGitAllowingFailure(arguments, at: directory)
+        guard status == 0 else {
+            throw NSError(
+                domain: "GitConflictWorkspaceTests.Git",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed"]
+            )
+        }
+    }
+
+    private func runGitAllowingFailure(_ arguments: [String], at directory: URL) throws -> Int32 {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", directory.path] + arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+        try process.run()
+        _ = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return process.terminationStatus
+    }
+}
+
+final class GitHistoryMutationEngineTests: XCTestCase {
+    private let engine = SystemGitEngine()
+
+    func testCherryPickAppliesSelectedFullCommitHash() throws {
+        let fixture = try makeFixture(prefix: "BranchlightCherryPick")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        try runGit(["checkout", "-b", "source"], at: fixture.repository)
+        try "picked\n".write(
+            to: fixture.repository.appendingPathComponent("picked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "picked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "pick me"], at: fixture.repository)
+        let sourceCommit = try gitOutput(["rev-parse", "HEAD"], at: fixture.repository)
+
+        try runGit(["checkout", "main"], at: fixture.repository)
+        _ = try engine.cherryPickCommit(at: fixture.repository, commitHash: sourceCommit)
+
+        XCTAssertEqual(try engine.history(at: fixture.repository, limit: 1).first?.subject, "pick me")
+        XCTAssertEqual(
+            try String(contentsOf: fixture.repository.appendingPathComponent("picked.txt"), encoding: .utf8),
+            "picked\n"
+        )
+        XCTAssertTrue(try engine.status(at: fixture.repository).isClean)
+    }
+
+    func testRevertCreatesNewCommitAndRestoresPreviousContent() throws {
+        let fixture = try makeFixture(prefix: "BranchlightRevert")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        try "changed\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "change to revert"], at: fixture.repository)
+        let changedCommit = try gitOutput(["rev-parse", "HEAD"], at: fixture.repository)
+
+        _ = try engine.revertCommit(at: fixture.repository, commitHash: changedCommit)
+
+        XCTAssertEqual(
+            try String(contentsOf: fixture.repository.appendingPathComponent("tracked.txt"), encoding: .utf8),
+            "base\n"
+        )
+        let history = try engine.history(at: fixture.repository, limit: 2)
+        XCTAssertEqual(history.count, 2)
+        XCTAssertTrue(history[0].subject.localizedCaseInsensitiveContains("revert"))
+        XCTAssertEqual(history[1].hash, changedCommit)
+        XCTAssertTrue(try engine.status(at: fixture.repository).isClean)
+    }
+
+    func testCherryPickConflictCanBeAbortedWithoutLeavingOperationState() async throws {
+        let fixture = try makeFixture(prefix: "BranchlightCherryPickAbort")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        try runGit(["checkout", "-b", "source"], at: fixture.repository)
+        try "source\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "source conflict"], at: fixture.repository)
+        let sourceCommit = try gitOutput(["rev-parse", "HEAD"], at: fixture.repository)
+
+        try runGit(["checkout", "main"], at: fixture.repository)
+        try "main\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "main conflict"], at: fixture.repository)
+
+        XCTAssertThrowsError(try engine.cherryPickCommit(at: fixture.repository, commitHash: sourceCommit))
+        var intelligence = try await InProcessGitService().repositoryIntelligence(at: fixture.repository)
+        XCTAssertEqual(intelligence.operationMode, .cherryPicking)
+        XCTAssertEqual(intelligence.conflictCount, 1)
+
+        _ = try engine.abortCherryPick(at: fixture.repository)
+        intelligence = try await InProcessGitService().repositoryIntelligence(at: fixture.repository)
+        XCTAssertEqual(intelligence.operationMode, .normal)
+        XCTAssertTrue(try engine.status(at: fixture.repository).isClean)
+        XCTAssertEqual(
+            try String(contentsOf: fixture.repository.appendingPathComponent("tracked.txt"), encoding: .utf8),
+            "main\n"
+        )
+    }
+
+    func testHistoryMutationsRejectAnythingButFullHexCommitHash() throws {
+        let fixture = try makeFixture(prefix: "BranchlightHistoryValidation")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertThrowsError(try engine.cherryPickCommit(at: fixture.repository, commitHash: "HEAD"))
+        XCTAssertThrowsError(try engine.revertCommit(at: fixture.repository, commitHash: "--no-edit"))
+        XCTAssertThrowsError(try engine.revertCommit(at: fixture.repository, commitHash: "deadbeef"))
+    }
+
+    func testCoordinatedHistoryServiceJournalsCherryPickAndRevert() async throws {
+        let fixture = try makeFixture(prefix: "BranchlightHistoryRuntime")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        try runGit(["checkout", "-b", "source"], at: fixture.repository)
+        try "picked\n".write(
+            to: fixture.repository.appendingPathComponent("picked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "picked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "runtime pick"], at: fixture.repository)
+        let sourceCommit = try gitOutput(["rev-parse", "HEAD"], at: fixture.repository)
+        try runGit(["checkout", "main"], at: fixture.repository)
+
+        let coordinator = GitOperationCoordinator()
+        let base = InProcessGitService(engine: engine, coordinator: coordinator, registry: GitRepositoryRegistry())
+        let historyService = CoordinatedGitHistoryMutationService(
+            engine: engine,
+            coordinator: coordinator,
+            base: base
+        )
+
+        _ = try await historyService.cherryPick(
+            at: fixture.repository,
+            commitHash: sourceCommit,
+            confirmationProvided: true
+        )
+        var records = await base.recentOperations(limit: 2)
+        let cherryPickRecord = try XCTUnwrap(records.first(where: { $0.descriptor?.intent == .cherryPick }))
+        XCTAssertEqual(cherryPickRecord.state, .succeeded)
+        XCTAssertEqual(cherryPickRecord.descriptor?.reference, sourceCommit)
+        XCTAssertEqual(cherryPickRecord.preCheckpoint?.operationMode, .normal)
+        XCTAssertEqual(cherryPickRecord.postCheckpoint?.operationMode, .normal)
+        XCTAssertNotEqual(cherryPickRecord.preCheckpoint?.headCommit, cherryPickRecord.postCheckpoint?.headCommit)
+
+        let pickedCommit = try XCTUnwrap(try engine.history(at: fixture.repository, limit: 1).first?.hash)
+        _ = try await historyService.revert(
+            at: fixture.repository,
+            commitHash: pickedCommit,
+            confirmationProvided: true
+        )
+        records = await base.recentOperations(limit: 2)
+        let revertRecord = try XCTUnwrap(records.first(where: { $0.descriptor?.intent == .revert }))
+        XCTAssertEqual(revertRecord.state, .succeeded)
+        XCTAssertEqual(revertRecord.descriptor?.reference, pickedCommit)
+        XCTAssertNotEqual(revertRecord.preCheckpoint?.headCommit, revertRecord.postCheckpoint?.headCommit)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.repository.appendingPathComponent("picked.txt").path))
+    }
+
+    func testCoordinatedCherryPickConflictJournalsFailureThenAbort() async throws {
+        let fixture = try makeFixture(prefix: "BranchlightHistoryRuntimeConflict")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        try runGit(["checkout", "-b", "source"], at: fixture.repository)
+        try "source\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "runtime source conflict"], at: fixture.repository)
+        let sourceCommit = try gitOutput(["rev-parse", "HEAD"], at: fixture.repository)
+
+        try runGit(["checkout", "main"], at: fixture.repository)
+        try "main\n".write(
+            to: fixture.repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: fixture.repository)
+        try runGit(["commit", "-m", "runtime main conflict"], at: fixture.repository)
+
+        let coordinator = GitOperationCoordinator()
+        let base = InProcessGitService(engine: engine, coordinator: coordinator, registry: GitRepositoryRegistry())
+        let historyService = CoordinatedGitHistoryMutationService(
+            engine: engine,
+            coordinator: coordinator,
+            base: base
+        )
+
+        do {
+            _ = try await historyService.cherryPick(
+                at: fixture.repository,
+                commitHash: sourceCommit,
+                confirmationProvided: true
+            )
+            XCTFail("Expected cherry-pick conflict.")
+        } catch {
+            // Expected: Git leaves CHERRY_PICK_HEAD and conflict stages for user resolution.
+        }
+
+        var records = await base.recentOperations(limit: 2)
+        let failed = try XCTUnwrap(records.first(where: { $0.descriptor?.intent == .cherryPick }))
+        XCTAssertEqual(failed.state, .failed)
+        XCTAssertEqual(failed.postCheckpoint?.operationMode, .cherryPicking)
+
+        _ = try await historyService.abortCherryPick(at: fixture.repository)
+        records = await base.recentOperations(limit: 2)
+        let abort = try XCTUnwrap(records.first(where: {
+            $0.descriptor?.intent == .cherryPick && $0.descriptor?.parameters["control"] == "abort"
+        }))
+        XCTAssertEqual(abort.state, .succeeded)
+        XCTAssertEqual(abort.preCheckpoint?.operationMode, .cherryPicking)
+        XCTAssertEqual(abort.postCheckpoint?.operationMode, .normal)
+        XCTAssertTrue(try engine.status(at: fixture.repository).isClean)
+    }
+
+    private func makeFixture(prefix: String) throws -> (root: URL, repository: URL) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
+        let repository = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try runGit(["init", "-b", "main"], at: repository)
+        try runGit(["config", "user.email", "branchlight-history@example.invalid"], at: repository)
+        try runGit(["config", "user.name", "Branchlight History Tests"], at: repository)
+        try "base\n".write(
+            to: repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "tracked.txt"], at: repository)
+        try runGit(["commit", "-m", "initial"], at: repository)
+        return (root, repository)
+    }
+
+    private func runGit(_ arguments: [String], at directory: URL) throws {
+        let status = try runGitAllowingFailure(arguments, at: directory)
+        guard status == 0 else {
+            throw NSError(
+                domain: "GitHistoryMutationEngineTests.Git",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed"]
+            )
+        }
+    }
+
+    private func gitOutput(_ arguments: [String], at directory: URL) throws -> String {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", directory.path] + arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+        try process.run()
+        let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "GitHistoryMutationEngineTests.Git", code: Int(process.terminationStatus))
+        }
+        return (String(data: stdout, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func runGitAllowingFailure(_ arguments: [String], at directory: URL) throws -> Int32 {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", directory.path] + arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { _, new in new }
+        try process.run()
+        _ = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return process.terminationStatus
     }
 }

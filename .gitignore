@@ -14,6 +14,7 @@ build/
 *.app
 *.dSYM
 *.xcresult
+.release-output/
 
 # SwiftPM
 .swiftpm/
@@ -21,6 +22,8 @@ build/
 Package.resolved
 
 # Local signing / provisioning
+Config/Branchlight.local.xcconfig
+Config/Branchlight.oauth.local.xcconfig
 *.mobileprovision
 *.provisionprofile
 *.cer
@@ -38,3 +41,6 @@ Package.resolved
 *.tmp
 *.swp
 *~
+
+# Local real-Mac acceptance evidence
+.branchlight-local-acceptance/

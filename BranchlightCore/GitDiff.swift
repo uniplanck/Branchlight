@@ -357,3 +357,368 @@ public enum GitPatchBuilder {
         count == 1 ? "\(start)" : "\(start),\(count)"
     }
 }
+
+public extension GitService {
+    func conflictFile(
+        at repositoryURL: URL,
+        path: String,
+        maximumBytes: Int = 2 * 1024 * 1024
+    ) async throws -> GitConflictFile {
+        let root = try await repositoryRoot(for: repositoryURL)
+        return try await Task.detached(priority: .userInitiated) {
+            try SystemGitEngine().conflictFile(at: root, path: path, maximumBytes: maximumBytes)
+        }.value
+    }
+
+    @discardableResult
+    func resolveConflict(
+        at repositoryURL: URL,
+        path: String,
+        result: String,
+        maximumBytes: Int = 2 * 1024 * 1024
+    ) async throws -> GitStatusSnapshot {
+        let root = try await repositoryRoot(for: repositoryURL).standardizedFileURL
+        let data = Data(result.utf8)
+        let boundedMaximum = max(1, maximumBytes)
+        guard data.count <= boundedMaximum else {
+            throw GitConflictWorkspaceError.fileTooLarge(path)
+        }
+        guard !data.contains(0) else {
+            throw GitConflictWorkspaceError.unsupportedBinary(path)
+        }
+
+        let resultURL = root.appendingPathComponent(path, isDirectory: false).standardizedFileURL
+        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        guard !path.isEmpty,
+              path != ".",
+              !path.hasPrefix("/"),
+              !path.contains("\0"),
+              resultURL.path.hasPrefix(rootPath) else {
+            throw GitConflictWorkspaceError.invalidPath(path)
+        }
+
+        _ = try await conflictFile(at: root, path: path, maximumBytes: maximumBytes)
+        let permissions = (try? FileManager.default.attributesOfItem(atPath: resultURL.path)[.posixPermissions])
+        try data.write(to: resultURL, options: [.atomic])
+        if let permissions {
+            try? FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: resultURL.path)
+        }
+
+        // Editing the working-tree document is a host-side document mutation. The Git index
+        // mutation still goes through the existing service stage path, so coordinator,
+        // checkpoints and operation journaling remain authoritative for Git state.
+        try await stage(at: root, paths: [path])
+        let load = try await loadRepository(at: root, includeMetadata: false, historyLimit: 1)
+        guard !load.snapshot.paths.contains(where: { $0.path == path && $0.kind == .conflicted }) else {
+            throw GitEngineError.invalidOutput("Git still reports \(path) as conflicted after staging the resolution.")
+        }
+        return load.snapshot
+    }
+}
+
+// MARK: - Intelligent Git context boundary
+
+public enum GitAIIntent: String, Codable, CaseIterable, Hashable, Sendable {
+    case explainDiff
+    case reviewChanges
+    case composeCommitMessage
+    case assistConflict
+}
+
+public struct GitAIContextPolicy: Codable, Hashable, Sendable {
+    public let maximumCharacters: Int
+    public let maximumPaths: Int
+    public let maximumRecentCommits: Int
+    public let sensitivePathFragments: [String]
+
+    public init(
+        maximumCharacters: Int = 120_000,
+        maximumPaths: Int = 200,
+        maximumRecentCommits: Int = 30,
+        sensitivePathFragments: [String] = [
+            ".env", "id_rsa", "id_ed25519", ".pem", ".p12", ".pfx", ".key",
+            "credentials", "secrets", "secret.", "private_key", "auth-token", "access-token"
+        ]
+    ) {
+        self.maximumCharacters = max(1_000, maximumCharacters)
+        self.maximumPaths = max(1, maximumPaths)
+        self.maximumRecentCommits = max(1, maximumRecentCommits)
+        self.sensitivePathFragments = sensitivePathFragments
+    }
+
+    public func isSensitive(path: String) -> Bool {
+        let normalized = path.lowercased()
+        return sensitivePathFragments.contains { fragment in
+            normalized.contains(fragment.lowercased())
+        }
+    }
+}
+
+public struct GitAIPathContext: Codable, Hashable, Sendable {
+    public let path: String
+    public let kind: GitStatusKind
+    public let isStaged: Bool
+
+    public init(path: String, kind: GitStatusKind, isStaged: Bool) {
+        self.path = path
+        self.kind = kind
+        self.isStaged = isStaged
+    }
+}
+
+public struct GitAICommitContext: Codable, Hashable, Sendable {
+    public let hash: String
+    public let subject: String
+    public let author: String
+
+    public init(hash: String, subject: String, author: String) {
+        self.hash = hash
+        self.subject = subject
+        self.author = author
+    }
+}
+
+public struct GitAIContext: Codable, Hashable, Sendable {
+    public let repositoryName: String
+    public let branch: String
+    public let upstream: String?
+    public let tracking: GitAheadBehind?
+    public let operationMode: GitRepositoryOperationMode
+    public let paths: [GitAIPathContext]
+    public let unstagedDiff: String
+    public let stagedDiff: String
+    public let recentCommits: [GitAICommitContext]
+    public let redactedPaths: [String]
+    public let wasTruncated: Bool
+
+    public init(
+        repositoryName: String,
+        branch: String,
+        upstream: String?,
+        tracking: GitAheadBehind?,
+        operationMode: GitRepositoryOperationMode,
+        paths: [GitAIPathContext],
+        unstagedDiff: String,
+        stagedDiff: String,
+        recentCommits: [GitAICommitContext],
+        redactedPaths: [String],
+        wasTruncated: Bool
+    ) {
+        self.repositoryName = repositoryName
+        self.branch = branch
+        self.upstream = upstream
+        self.tracking = tracking
+        self.operationMode = operationMode
+        self.paths = paths
+        self.unstagedDiff = unstagedDiff
+        self.stagedDiff = stagedDiff
+        self.recentCommits = recentCommits
+        self.redactedPaths = redactedPaths
+        self.wasTruncated = wasTruncated
+    }
+}
+
+public struct GitAIRequest: Codable, Hashable, Sendable {
+    public let intent: GitAIIntent
+    public let context: GitAIContext
+    public let instruction: String?
+
+    public init(intent: GitAIIntent, context: GitAIContext, instruction: String? = nil) {
+        self.intent = intent
+        self.context = context
+        self.instruction = instruction
+    }
+}
+
+public struct GitAIResponse: Codable, Hashable, Sendable {
+    public let text: String
+    public let provider: String
+    public let model: String?
+
+    public init(text: String, provider: String, model: String? = nil) {
+        self.text = text
+        self.provider = provider
+        self.model = model
+    }
+}
+
+public protocol GitAIProvider: Sendable {
+    var providerName: String { get }
+    func perform(_ request: GitAIRequest) async throws -> GitAIResponse
+}
+
+public enum GitAIContextBuilder {
+    public static func build(
+        repositoryURL: URL,
+        snapshot: GitStatusSnapshot,
+        intelligence: GitRepositoryIntelligence,
+        unstagedDiff: String,
+        stagedDiff: String,
+        recentCommits: [GitCommit],
+        policy: GitAIContextPolicy = GitAIContextPolicy()
+    ) -> GitAIContext {
+        let boundedStatuses = Array(snapshot.paths.prefix(policy.maximumPaths))
+        let redactedPaths = boundedStatuses
+            .map(\.path)
+            .filter(policy.isSensitive(path:))
+            .sorted()
+
+        let safePaths = boundedStatuses
+            .filter { !policy.isSensitive(path: $0.path) }
+            .map { GitAIPathContext(path: $0.path, kind: $0.kind, isStaged: $0.isStaged) }
+
+        let safeUnstaged = sanitizeDiff(unstagedDiff, policy: policy)
+        let safeStaged = sanitizeDiff(stagedDiff, policy: policy)
+        let combined = truncatePair(
+            safeUnstaged,
+            safeStaged,
+            maximumCharacters: policy.maximumCharacters
+        )
+        let commits = recentCommits.prefix(policy.maximumRecentCommits).map {
+            GitAICommitContext(hash: $0.hash, subject: $0.subject, author: $0.author)
+        }
+
+        return GitAIContext(
+            repositoryName: repositoryURL.standardizedFileURL.lastPathComponent,
+            branch: intelligence.branch,
+            upstream: intelligence.upstream,
+            tracking: intelligence.tracking,
+            operationMode: intelligence.operationMode,
+            paths: safePaths,
+            unstagedDiff: combined.unstaged,
+            stagedDiff: combined.staged,
+            recentCommits: Array(commits),
+            redactedPaths: redactedPaths,
+            wasTruncated: snapshot.paths.count > policy.maximumPaths || combined.wasTruncated
+        )
+    }
+
+    private static func sanitizeDiff(_ diff: String, policy: GitAIContextPolicy) -> String {
+        guard !diff.isEmpty else { return "" }
+        var output: [String] = []
+        var block: [String] = []
+
+        func flush() {
+            guard !block.isEmpty else { return }
+            let header = block.first ?? ""
+            if policy.sensitivePathFragments.contains(where: { header.lowercased().contains($0.lowercased()) }) {
+                output.append("diff --git [REDACTED] [REDACTED]\n[REDACTED SENSITIVE PATH]")
+            } else {
+                output.append(block.joined(separator: "\n"))
+            }
+            block.removeAll(keepingCapacity: true)
+        }
+
+        for line in diff.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            if line.hasPrefix("diff --git ") {
+                flush()
+            }
+            block.append(line)
+        }
+        flush()
+        return output.joined(separator: "\n")
+    }
+
+    private static func truncatePair(
+        _ unstaged: String,
+        _ staged: String,
+        maximumCharacters: Int
+    ) -> (unstaged: String, staged: String, wasTruncated: Bool) {
+        let total = unstaged.count + staged.count
+        guard total > maximumCharacters else { return (unstaged, staged, false) }
+
+        let stagedBudget = min(staged.count, maximumCharacters / 2)
+        let unstagedBudget = max(0, maximumCharacters - stagedBudget)
+        let safeUnstaged = String(unstaged.prefix(unstagedBudget))
+        let remaining = max(0, maximumCharacters - safeUnstaged.count)
+        let safeStaged = String(staged.prefix(remaining))
+        return (safeUnstaged, safeStaged, true)
+    }
+}
+
+public enum GitAgentContextExporter {
+    public static func markdown(_ context: GitAIContext) -> String {
+        var lines: [String] = [
+            "# Branchlight Agent Context",
+            "",
+            "Repository: \(context.repositoryName)",
+            "Branch: \(context.branch)",
+            "Upstream: \(context.upstream ?? "none")",
+            "Tracking: \(context.tracking?.summary ?? "unknown")",
+            "Operation: \(context.operationMode.rawValue)",
+            "Truncated: \(context.wasTruncated ? "yes" : "no")",
+            ""
+        ]
+
+        if !context.redactedPaths.isEmpty {
+            lines += ["## Redacted sensitive paths"]
+            lines += context.redactedPaths.map { "- \($0)" }
+            lines.append("")
+        }
+
+        lines.append("## Changed paths")
+        if context.paths.isEmpty {
+            lines.append("- none")
+        } else {
+            lines += context.paths.map {
+                "- \($0.kind.rawValue)\($0.isStaged ? " [staged]" : ""): \($0.path)"
+            }
+        }
+        lines.append("")
+
+        lines.append("## Recent commits")
+        if context.recentCommits.isEmpty {
+            lines.append("- none")
+        } else {
+            lines += context.recentCommits.map {
+                "- \(String($0.hash.prefix(12))) \($0.subject) — \($0.author)"
+            }
+        }
+        lines.append("")
+
+        lines += ["## Unstaged diff", "```diff", context.unstagedDiff, "```", ""]
+        lines += ["## Staged diff", "```diff", context.stagedDiff, "```", ""]
+        return lines.joined(separator: "\n")
+    }
+}
+
+public extension GitService {
+    func intelligentContext(
+        at repositoryURL: URL,
+        policy: GitAIContextPolicy = GitAIContextPolicy()
+    ) async throws -> GitAIContext {
+        async let loadRequest = loadRepository(
+            at: repositoryURL,
+            includeMetadata: true,
+            historyLimit: policy.maximumRecentCommits
+        )
+        async let intelligenceRequest = repositoryIntelligence(at: repositoryURL)
+        async let unstagedRequest = diff(at: repositoryURL, paths: [], staged: false)
+        async let stagedRequest = diff(at: repositoryURL, paths: [], staged: true)
+
+        let (load, intelligence, unstaged, staged) = try await (
+            loadRequest,
+            intelligenceRequest,
+            unstagedRequest,
+            stagedRequest
+        )
+        return GitAIContextBuilder.build(
+            repositoryURL: repositoryURL,
+            snapshot: load.snapshot,
+            intelligence: intelligence,
+            unstagedDiff: unstaged,
+            stagedDiff: staged,
+            recentCommits: load.history ?? [],
+            policy: policy
+        )
+    }
+
+    func agentContextMarkdown(
+        at repositoryURL: URL,
+        policy: GitAIContextPolicy = GitAIContextPolicy()
+    ) async throws -> String {
+        GitAgentContextExporter.markdown(
+            try await intelligentContext(at: repositoryURL, policy: policy)
+        )
+    }
+}

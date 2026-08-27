@@ -12,6 +12,8 @@ private let branchlightCacheChangedCallback: CFNotificationCallback = { _, obser
 final class FinderSync: FIFinderSync {
     private let controller = FIFinderSyncController.default()
     private let cache = SharedStatusCache()
+    private let envelopeLock = NSLock()
+    private var cachedEnvelope = StatusCacheEnvelope()
 
     override init() {
         super.init()
@@ -25,6 +27,19 @@ final class FinderSync: FIFinderSync {
             nil,
             .deliverImmediately
         )
+        let workspaceNotifications = NSWorkspace.shared.notificationCenter
+        workspaceNotifications.addObserver(
+            self,
+            selector: #selector(workspaceDidResume(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        workspaceNotifications.addObserver(
+            self,
+            selector: #selector(workspaceDidResume(_:)),
+            name: NSWorkspace.sessionDidBecomeActiveNotification,
+            object: nil
+        )
     }
 
     deinit {
@@ -34,10 +49,11 @@ final class FinderSync: FIFinderSync {
             SharedStatusNotifications.cacheChanged,
             nil
         )
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     override func requestBadgeIdentifier(for url: URL) {
-        guard let envelope = cache?.load() else { return }
+        let envelope = currentEnvelope()
         let kind = envelope.statusKind(forAbsolutePath: url.standardizedFileURL.path)
         controller.setBadgeIdentifier(kind == .clean || kind == .ignored ? "" : kind.rawValue, for: url)
     }
@@ -53,17 +69,45 @@ final class FinderSync: FIFinderSync {
         let urls = urlsForCurrentContext()
         let menu = NSMenu(title: "Branchlight")
 
-        if !urls.isEmpty, let envelope = cache?.load() {
+        if !urls.isEmpty {
+            // Context menus are user-driven, not a Finder hot path. Reload the shared
+            // envelope here so a missed Darwin notification cannot leave actionable
+            // status stale while badge callbacks remain memory-only.
+            let envelope = reloadCachedEnvelopeFromDisk()
             let aggregate = GitStatusClassifier.aggregate(
                 urls.map { envelope.statusKind(forAbsolutePath: $0.standardizedFileURL.path) }
             )
-            let statusItem = NSMenuItem(
-                title: "Status: \(aggregate.rawValue.capitalized)",
-                action: nil,
-                keyEquivalent: ""
-            )
-            statusItem.isEnabled = false
-            menu.addItem(statusItem)
+            let context = selectionPlan(for: urls, envelope: envelope)
+
+            addDisabledItem(title: "Status: \(aggregate.rawValue.capitalized)", to: menu)
+
+            if let context,
+               let intelligence = envelope.intelligence(forRepositoryRoot: context.repositoryRoot) {
+                var branchTitle = intelligence.isDetachedHead
+                    ? "HEAD: \(intelligence.branch)"
+                    : "Branch: \(intelligence.branch)"
+                if let tracking = intelligence.tracking {
+                    branchTitle += "  \(tracking.summary)"
+                }
+                addDisabledItem(title: branchTitle, to: menu)
+
+                if intelligence.operationMode != .normal {
+                    var operationTitle = "Operation: \(displayName(for: intelligence.operationMode))"
+                    if intelligence.conflictCount > 0 {
+                        operationTitle += "  •  \(intelligence.conflictCount) conflict\(intelligence.conflictCount == 1 ? "" : "s")"
+                    }
+                    addDisabledItem(title: operationTitle, to: menu)
+                }
+
+                let counts = [
+                    "Changed \(intelligence.changedCount)",
+                    "Staged \(intelligence.stagedCount)",
+                    "Untracked \(intelligence.untrackedCount)",
+                    "Conflicts \(intelligence.conflictCount)"
+                ].joined(separator: "  •  ")
+                addDisabledItem(title: counts, to: menu)
+            }
+
             menu.addItem(.separator())
 
             let changesItem = NSMenuItem(
@@ -74,7 +118,7 @@ final class FinderSync: FIFinderSync {
             changesItem.target = self
             menu.addItem(changesItem)
 
-            if let context = selectionPlan(for: urls, envelope: envelope) {
+            if let context {
                 if context.canStage {
                     let stageItem = NSMenuItem(
                         title: "Stage Selected",
@@ -132,11 +176,34 @@ final class FinderSync: FIFinderSync {
         openContainingApp()
     }
 
+    @objc private func workspaceDidResume(_ notification: Notification) {
+        reloadMonitoredRoots()
+    }
+
     fileprivate func reloadMonitoredRoots() {
-        let roots = cache?.load().monitoredRoots ?? []
+        let envelope = cache?.load() ?? StatusCacheEnvelope()
+        replaceCachedEnvelope(envelope)
         controller.directoryURLs = Set(
-            roots.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }
+            envelope.monitoredRoots.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }
         )
+    }
+
+    private func replaceCachedEnvelope(_ envelope: StatusCacheEnvelope) {
+        envelopeLock.lock()
+        cachedEnvelope = envelope
+        envelopeLock.unlock()
+    }
+
+    private func currentEnvelope() -> StatusCacheEnvelope {
+        envelopeLock.lock()
+        defer { envelopeLock.unlock() }
+        return cachedEnvelope
+    }
+
+    private func reloadCachedEnvelopeFromDisk() -> StatusCacheEnvelope {
+        let envelope = cache?.load() ?? StatusCacheEnvelope()
+        replaceCachedEnvelope(envelope)
+        return envelope
     }
 
     private func registerBadges() {
@@ -174,10 +241,27 @@ final class FinderSync: FIFinderSync {
         )
     }
 
+    private func addDisabledItem(title: String, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
+    }
+
+    private func displayName(for mode: GitRepositoryOperationMode) -> String {
+        switch mode {
+        case .normal: return "Normal"
+        case .merging: return "Merge in progress"
+        case .rebasing: return "Rebase in progress"
+        case .cherryPicking: return "Cherry-pick in progress"
+        case .reverting: return "Revert in progress"
+        case .bisecting: return "Bisect in progress"
+        }
+    }
+
     private func enqueueFinderIntent(_ action: FinderIntentAction) {
         let urls = urlsForCurrentContext()
-        guard let envelope = cache?.load(),
-              let context = selectionPlan(for: urls, envelope: envelope) else {
+        let envelope = currentEnvelope()
+        guard let context = selectionPlan(for: urls, envelope: envelope) else {
             openContainingApp()
             return
         }

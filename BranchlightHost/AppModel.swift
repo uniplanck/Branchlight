@@ -26,6 +26,10 @@ final class AppModel: ObservableObject {
     @Published var stashIncludeUntracked = true
     @Published var newWorktreeBranch = ""
     @Published var worktreeStartPoint = "HEAD"
+    @Published var conflictFile: GitConflictFile?
+    @Published var selectedConflictPath: String?
+    @Published var conflictResult = ""
+    @Published var isLoadingConflict = false
     @Published var isRefreshing = false
     @Published var errorMessage: String?
     @Published var lastOperation: String?
@@ -33,11 +37,46 @@ final class AppModel: ObservableObject {
     private let cache = HostStatusCache()
     private let finderRequestCache = HostFinderRequestCache()
     private let gitService: any GitService
+    private let repositoryResolver: XPCRepositoryResolver
+    private let historyMutationService: any GitHistoryMutationService
     private var repositoryWatcher: RepositoryWatcher?
+    private var finderRequestSignalObserver: FinderRequestSignalObserver?
+    private var watcherRefreshPending = false
+    private var watcherRefreshDrainActive = false
 
-    init(gitService: any GitService = InProcessGitService()) {
-        self.gitService = gitService
+    init() {
+        let engine = SystemGitEngine()
+        let coordinator = GitOperationCoordinator()
+        let registry = GitRepositoryRegistry()
+        let base = InProcessGitService(engine: engine, coordinator: coordinator, registry: registry)
+        self.gitService = base
+        self.repositoryResolver = XPCRepositoryResolver(fallback: base)
+        self.historyMutationService = CoordinatedGitHistoryMutationService(
+            engine: engine,
+            coordinator: coordinator,
+            base: base
+        )
+        startObservingFinderRequests()
         Task { await restoreCachedState() }
+    }
+
+    init(
+        gitService: any GitService,
+        historyMutationService: any GitHistoryMutationService
+    ) {
+        self.gitService = gitService
+        self.repositoryResolver = XPCRepositoryResolver(fallback: gitService)
+        self.historyMutationService = historyMutationService
+        startObservingFinderRequests()
+        Task { await restoreCachedState() }
+    }
+
+    private func startObservingFinderRequests() {
+        finderRequestSignalObserver = FinderRequestSignalObserver { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.consumeFinderRequest()
+            }
+        }
     }
 
     private func restoreCachedState() async {
@@ -70,6 +109,13 @@ final class AppModel: ObservableObject {
         snapshot?.paths.contains(where: { $0.isStaged }) == true
     }
 
+    var conflictedPaths: [String] {
+        snapshot?.paths
+            .filter { $0.kind == .conflicted }
+            .map(\.path)
+            .sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) ?? []
+    }
+
     var selectedFilePath: String? {
         guard selectedPaths.count == 1 else { return nil }
         return selectedPaths.first
@@ -93,7 +139,7 @@ final class AppModel: ObservableObject {
         errorMessage = nil
         Task {
             do {
-                let root = try await gitService.repositoryRoot(for: selected)
+                let root = try await repositoryResolver.repositoryRoot(for: selected)
                 openRepository(path: root.path)
             } catch {
                 errorMessage = error.localizedDescription
@@ -114,6 +160,7 @@ final class AppModel: ObservableObject {
         blameLines = []
         stashes = []
         worktrees = []
+        clearConflictWorkspace()
         errorMessage = nil
         startWatching(path: path)
         Task { await refresh() }
@@ -135,7 +182,7 @@ final class AppModel: ObservableObject {
         let requestedURL = URL(fileURLWithPath: requestedPath)
 
         do {
-            let root = try await gitService.repositoryRoot(for: requestedURL)
+            let root = try await repositoryResolver.repositoryRoot(for: requestedURL)
             repositoryURL = root
             finderIntegrationWarning = FinderIntegrationCompatibility.warning(for: root)
             errorMessage = nil
@@ -227,6 +274,10 @@ final class AppModel: ObservableObject {
                 worktrees = refreshedWorktrees
             }
             selectedPaths = selectedPaths.intersection(Set(load.snapshot.paths.map(\.path)))
+            if let selectedConflictPath,
+               !load.snapshot.paths.contains(where: { $0.path == selectedConflictPath && $0.kind == .conflicted }) {
+                clearConflictWorkspace()
+            }
             isRefreshing = false
             persistSnapshotForFinder(load.snapshot)
         } catch {
@@ -324,6 +375,157 @@ final class AppModel: ObservableObject {
         runMutation(label: "Switched to \(name)") { service, repositoryURL in
             try await service.switchBranch(at: repositoryURL, name: name)
         }
+    }
+
+    func mergeBranch(_ name: String) {
+        runMutation(label: "Merged \(name)") { service, repositoryURL in
+            _ = try await service.merge(
+                at: repositoryURL,
+                branch: name,
+                confirmationProvided: true
+            )
+        }
+    }
+
+    func continueMerge() {
+        runMutation(label: "Merge continued") { service, repositoryURL in
+            _ = try await service.continueMerge(at: repositoryURL)
+        }
+    }
+
+    func abortMerge() {
+        runMutation(label: "Merge aborted") { service, repositoryURL in
+            _ = try await service.abortMerge(at: repositoryURL)
+        }
+    }
+
+    func rebaseCurrentBranch(onto name: String) {
+        runMutation(label: "Rebased onto \(name)") { service, repositoryURL in
+            _ = try await service.rebase(
+                at: repositoryURL,
+                onto: name,
+                confirmationProvided: true
+            )
+        }
+    }
+
+    func continueRebase() {
+        runMutation(label: "Rebase continued") { service, repositoryURL in
+            _ = try await service.continueRebase(at: repositoryURL)
+        }
+    }
+
+    func abortRebase() {
+        runMutation(label: "Rebase aborted") { service, repositoryURL in
+            _ = try await service.abortRebase(at: repositoryURL)
+        }
+    }
+
+    func skipRebaseCommit() {
+        runMutation(label: "Rebase commit skipped") { service, repositoryURL in
+            _ = try await service.skipRebase(at: repositoryURL)
+        }
+    }
+
+    func cherryPick(_ commit: GitCommit) {
+        let historyService = historyMutationService
+        runMutation(label: "Cherry-picked \(commit.shortHash)") { _, repositoryURL in
+            _ = try await historyService.cherryPick(
+                at: repositoryURL,
+                commitHash: commit.hash,
+                confirmationProvided: true
+            )
+        }
+    }
+
+    func continueCherryPick() {
+        let historyService = historyMutationService
+        runMutation(label: "Cherry-pick continued") { _, repositoryURL in
+            _ = try await historyService.continueCherryPick(at: repositoryURL)
+        }
+    }
+
+    func abortCherryPick() {
+        let historyService = historyMutationService
+        runMutation(label: "Cherry-pick aborted") { _, repositoryURL in
+            _ = try await historyService.abortCherryPick(at: repositoryURL)
+        }
+    }
+
+    func revert(_ commit: GitCommit) {
+        let historyService = historyMutationService
+        runMutation(label: "Reverted \(commit.shortHash)") { _, repositoryURL in
+            _ = try await historyService.revert(
+                at: repositoryURL,
+                commitHash: commit.hash,
+                confirmationProvided: true
+            )
+        }
+    }
+
+    func continueRevert() {
+        let historyService = historyMutationService
+        runMutation(label: "Revert continued") { _, repositoryURL in
+            _ = try await historyService.continueRevert(at: repositoryURL)
+        }
+    }
+
+    func abortRevert() {
+        let historyService = historyMutationService
+        runMutation(label: "Revert aborted") { _, repositoryURL in
+            _ = try await historyService.abortRevert(at: repositoryURL)
+        }
+    }
+
+    func loadConflict(path: String) {
+        guard let repositoryURL else { return }
+        isLoadingConflict = true
+        errorMessage = nil
+        Task {
+            do {
+                let loaded = try await gitService.conflictFile(at: repositoryURL, path: path)
+                conflictFile = loaded
+                selectedConflictPath = path
+                conflictResult = loaded.result ?? loaded.ours ?? loaded.theirs ?? loaded.base ?? ""
+                isLoadingConflict = false
+            } catch {
+                errorMessage = error.localizedDescription
+                isLoadingConflict = false
+            }
+        }
+    }
+
+    func useConflictBase() {
+        if let base = conflictFile?.base { conflictResult = base }
+    }
+
+    func useConflictOurs() {
+        if let ours = conflictFile?.ours { conflictResult = ours }
+    }
+
+    func useConflictTheirs() {
+        if let theirs = conflictFile?.theirs { conflictResult = theirs }
+    }
+
+    func resetConflictResult() {
+        conflictResult = conflictFile?.result ?? ""
+    }
+
+    func saveConflictResolution() {
+        guard let path = selectedConflictPath else { return }
+        let result = conflictResult
+        runMutation(label: "Resolved conflict in \(path)") { service, repositoryURL in
+            _ = try await service.resolveConflict(at: repositoryURL, path: path, result: result)
+        } onSuccess: {
+            self.clearConflictWorkspace()
+        }
+    }
+
+    private func clearConflictWorkspace() {
+        conflictFile = nil
+        selectedConflictPath = nil
+        conflictResult = ""
+        isLoadingConflict = false
     }
 
     func createStash() {
@@ -548,14 +750,36 @@ final class AppModel: ObservableObject {
 
     private func startWatching(path: String) {
         repositoryWatcher?.stop()
+        watcherRefreshPending = false
+
         let watcher = RepositoryWatcher { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self, !self.isRefreshing else { return }
-                await self.refreshStatusOnly()
+                self?.scheduleWatcherRefresh()
             }
         }
         repositoryWatcher = watcher
         watcher.start(path: path)
+    }
+
+    private func scheduleWatcherRefresh() {
+        watcherRefreshPending = true
+        guard !watcherRefreshDrainActive else { return }
+
+        watcherRefreshDrainActive = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.watcherRefreshDrainActive = false }
+
+            while self.watcherRefreshPending {
+                if self.isRefreshing {
+                    try? await Task<Never, Never>.sleep(nanoseconds: 100_000_000)
+                    continue
+                }
+
+                self.watcherRefreshPending = false
+                await self.refreshStatusOnly()
+            }
+        }
     }
 
     private func runMutation(
@@ -578,7 +802,12 @@ final class AppModel: ObservableObject {
                     loadDiff()
                 }
             } catch {
-                errorMessage = error.localizedDescription
+                let mutationError = error.localizedDescription
+                // A Git command can legitimately fail after changing repository state,
+                // most notably merge/rebase conflicts and stash-pop conflicts. Always
+                // reconcile the repository before presenting the failure to the user.
+                await refresh()
+                errorMessage = mutationError
                 isRefreshing = false
             }
         }

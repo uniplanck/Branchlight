@@ -7,12 +7,19 @@ struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedTab = 0
     @State private var branchToSwitch = ""
+    @State private var branchToMerge = ""
+    @State private var branchToRebaseOnto = ""
     @State private var showBranchConfirmation = false
+    @State private var showMergeConfirmation = false
+    @State private var showRebaseConfirmation = false
     @State private var showPullConfirmation = false
     @State private var showStashes = true
     @State private var historyMode: HistoryMode = .repository
     @State private var stashToDrop: GitStashEntry?
     @State private var worktreeToRemove: GitWorktree?
+    @State private var commitToCherryPick: GitCommit?
+    @State private var commitToRevert: GitCommit?
+    @State private var inspectedCommit: GitCommit?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -39,6 +46,14 @@ struct ContentView: View {
                     branchesView
                         .tabItem { Label("Branches", systemImage: "point.3.connected.trianglepath.dotted") }
                         .tag(3)
+                    conflictView
+                        .tabItem {
+                            Label(
+                                "Conflicts",
+                                systemImage: model.conflictedPaths.isEmpty ? "checkmark.shield" : "exclamationmark.triangle"
+                            )
+                        }
+                        .tag(4)
                 }
             } else {
                 emptyState
@@ -62,11 +77,55 @@ struct ContentView: View {
                  ? "The working tree has changes. Git will refuse unsafe switches, but review your changes before continuing."
                  : "Switch to \(branchToSwitch)?")
         }
+        .alert("Merge branch?", isPresented: $showMergeConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Merge") {
+                model.mergeBranch(branchToMerge)
+            }
+        } message: {
+            Text("Merge \(branchToMerge) into the current branch? If conflicts occur, Branchlight will keep the merge in progress so you can resolve or abort it safely.")
+        }
+        .alert("Rebase current branch?", isPresented: $showRebaseConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Rebase") {
+                model.rebaseCurrentBranch(onto: branchToRebaseOnto)
+            }
+        } message: {
+            Text("Rebase the current branch onto \(branchToRebaseOnto)? This rewrites the current branch's local commits and may require conflict resolution.")
+        }
         .alert("Pull remote changes?", isPresented: $showPullConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Pull") { model.pull() }
         } message: {
             Text("Branchlight uses git pull --ff-only. It will not create an automatic merge commit.")
+        }
+        .alert("Cherry-pick commit?", isPresented: Binding(
+            get: { commitToCherryPick != nil },
+            set: { if !$0 { commitToCherryPick = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { commitToCherryPick = nil }
+            Button("Cherry-pick") {
+                if let commit = commitToCherryPick { model.cherryPick(commit) }
+                commitToCherryPick = nil
+            }
+        } message: {
+            if let commit = commitToCherryPick {
+                Text("Apply \(commit.shortHash) “\(commit.subject)” onto the current branch? Conflicts will remain in progress for resolution in Branchlight.")
+            }
+        }
+        .alert("Revert commit?", isPresented: Binding(
+            get: { commitToRevert != nil },
+            set: { if !$0 { commitToRevert = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { commitToRevert = nil }
+            Button("Revert") {
+                if let commit = commitToRevert { model.revert(commit) }
+                commitToRevert = nil
+            }
+        } message: {
+            if let commit = commitToRevert {
+                Text("Create a new commit that reverses \(commit.shortHash) “\(commit.subject)”? Existing history will not be rewritten.")
+            }
         }
         .alert("Drop stash?", isPresented: Binding(
             get: { stashToDrop != nil },
@@ -106,18 +165,13 @@ struct ContentView: View {
             Spacer()
 
             if !model.monitoredRoots.isEmpty {
-                Menu("Repositories") {
-                    ForEach(model.monitoredRoots, id: \.self) { root in
-                        Button(URL(fileURLWithPath: root).lastPathComponent) {
-                            model.openRepository(path: root)
-                        }
-                    }
-                }
+                repositoryRadarMenu
             }
 
             Button("Add Repository…") {
                 model.chooseRepository()
             }
+            .accessibilityIdentifier("branchlight.addRepository")
 
             Button {
                 Task { await model.refresh() }
@@ -128,12 +182,50 @@ struct ContentView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
             }
+            .accessibilityIdentifier("branchlight.refresh")
+            .accessibilityLabel("Refresh repository")
             .disabled(model.repositoryURL == nil || model.isRefreshing)
         }
     }
 
+    private var repositoryRadarMenu: some View {
+        let envelope = SharedStatusCache()?.load() ?? StatusCacheEnvelope()
+        return Menu("Radar") {
+            ForEach(model.monitoredRoots, id: \.self) { root in
+                Button(radarTitle(for: root, envelope: envelope)) {
+                    model.openRepository(path: root)
+                }
+            }
+        }
+        .help("Repository Radar")
+    }
+
+    private func radarTitle(for root: String, envelope: StatusCacheEnvelope) -> String {
+        let name = URL(fileURLWithPath: root).lastPathComponent
+        guard let intelligence = envelope.intelligence(forRepositoryRoot: root) else {
+            return name
+        }
+
+        var components = [name, intelligence.isDetachedHead ? "HEAD \(intelligence.branch)" : intelligence.branch]
+        if let tracking = intelligence.tracking {
+            components.append(tracking.summary)
+        }
+        if intelligence.operationMode != .normal {
+            components.append(shortOperationName(intelligence.operationMode))
+        }
+        if intelligence.conflictCount > 0 {
+            components.append("\(intelligence.conflictCount) conflict\(intelligence.conflictCount == 1 ? "" : "s")")
+        } else if intelligence.changedCount > 0 {
+            components.append("\(intelligence.changedCount) changed")
+        } else {
+            components.append("clean")
+        }
+        return components.joined(separator: "  •  ")
+    }
+
     private func repositoryBar(_ snapshot: GitStatusSnapshot) -> some View {
-        HStack(spacing: 14) {
+        let intelligence = SharedStatusCache()?.load().intelligence(forRepositoryRoot: snapshot.repositoryRoot)
+        return HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(URL(fileURLWithPath: snapshot.repositoryRoot).lastPathComponent)
                     .font(.headline)
@@ -147,11 +239,19 @@ struct ContentView: View {
 
             Spacer()
 
-            Label(
-                snapshot.isDetachedHead ? "Detached @ \(snapshot.branch)" : snapshot.branch,
-                systemImage: "point.3.connected.trianglepath.dotted"
-            )
-            .font(.callout.weight(.medium))
+            VStack(alignment: .trailing, spacing: 3) {
+                Label(
+                    branchTitle(snapshot: snapshot, intelligence: intelligence),
+                    systemImage: "point.3.connected.trianglepath.dotted"
+                )
+                .font(.callout.weight(.medium))
+
+                if let intelligence, intelligence.operationMode != .normal {
+                    Label(shortOperationName(intelligence.operationMode), systemImage: "arrow.triangle.2.circlepath")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(intelligence.conflictCount > 0 ? .red : .secondary)
+                }
+            }
 
             Text(snapshot.summary)
                 .font(.callout)
@@ -161,6 +261,43 @@ struct ContentView: View {
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
     }
 
+    private func branchTitle(snapshot: GitStatusSnapshot, intelligence: GitRepositoryIntelligence?) -> String {
+        var title = snapshot.isDetachedHead ? "Detached @ \(snapshot.branch)" : snapshot.branch
+        if let tracking = intelligence?.tracking {
+            title += "  \(tracking.summary)"
+        }
+        return title
+    }
+
+    private func shortOperationName(_ mode: GitRepositoryOperationMode) -> String {
+        switch mode {
+        case .normal: return "Normal"
+        case .merging: return "Merging"
+        case .rebasing: return "Rebasing"
+        case .cherryPicking: return "Cherry-picking"
+        case .reverting: return "Reverting"
+        case .bisecting: return "Bisecting"
+        }
+    }
+
+    private var currentRepositoryIntelligence: GitRepositoryIntelligence? {
+        guard let root = model.snapshot?.repositoryRoot else { return nil }
+        return SharedStatusCache()?.load().intelligence(forRepositoryRoot: root)
+    }
+
+    private var hasGitOperationInProgress: Bool {
+        currentRepositoryIntelligence?.operationMode != .normal
+    }
+
+    private func isControllableOperation(_ mode: GitRepositoryOperationMode) -> Bool {
+        switch mode {
+        case .merging, .rebasing, .cherryPicking, .reverting:
+            return true
+        case .normal, .bisecting:
+            return false
+        }
+    }
+
     private func changesView(_ snapshot: GitStatusSnapshot) -> some View {
         VStack(spacing: 10) {
             HStack {
@@ -168,21 +305,27 @@ struct ContentView: View {
                     model.loadDiff()
                     selectedTab = 1
                 }
+                .accessibilityIdentifier("branchlight.showDiff")
                 .disabled(model.selectedPaths.isEmpty || model.isRefreshing)
 
                 Button("Stage") { model.stageSelected() }
+                    .accessibilityIdentifier("branchlight.stage")
                     .disabled(!model.canStageSelection || model.isRefreshing)
 
                 Button("Unstage") { model.unstageSelected() }
+                    .accessibilityIdentifier("branchlight.unstage")
                     .disabled(!model.canUnstageSelection || model.isRefreshing)
 
                 Spacer()
 
                 Button("Fetch") { model.fetch() }
+                    .accessibilityIdentifier("branchlight.fetch")
                     .disabled(model.isRefreshing)
                 Button("Pull…") { showPullConfirmation = true }
+                    .accessibilityIdentifier("branchlight.pull")
                     .disabled(model.isRefreshing)
                 Button("Push") { model.push() }
+                    .accessibilityIdentifier("branchlight.push")
                     .disabled(model.isRefreshing)
             }
 
@@ -219,7 +362,9 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 TextField("Commit message", text: $model.commitMessage)
                     .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("branchlight.commitMessage")
                 Button("Commit") { model.commit() }
+                    .accessibilityIdentifier("branchlight.commit")
                     .keyboardShortcut(.return, modifiers: [.command])
                     .disabled(!model.hasStagedChanges || model.commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isRefreshing)
             }
@@ -446,12 +591,20 @@ struct ContentView: View {
                 }
             }
 
+            if let intelligence = currentRepositoryIntelligence, isControllableOperation(intelligence.operationMode) {
+                advancedOperationCard(intelligence)
+            }
+
+            if let inspectedCommit {
+                commitDetailCard(inspectedCommit)
+            }
+
             switch historyMode {
             case .repository:
-                commitList(model.history)
+                commitList(model.history, showMutationActions: true)
             case .file:
                 if model.canInspectSelectedFile {
-                    commitList(model.fileHistory)
+                    commitList(model.fileHistory, showMutationActions: false)
                 } else {
                     historySelectionHint("Select one changed file in Changes, then return here for its history.")
                 }
@@ -464,10 +617,13 @@ struct ContentView: View {
             }
         }
         .padding(.top, 8)
-        .onChange(of: historyMode) { _ in loadHistoryMode() }
+        .onChange(of: historyMode) { _ in
+            inspectedCommit = nil
+            loadHistoryMode()
+        }
     }
 
-    private func commitList(_ commits: [GitCommit]) -> some View {
+    private func commitList(_ commits: [GitCommit], showMutationActions: Bool) -> some View {
         List(commits) { commit in
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(commit.shortHash)
@@ -488,8 +644,41 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button("Details") { inspectedCommit = commit }
+                if showMutationActions {
+                    Button("Cherry-pick…") { commitToCherryPick = commit }
+                        .disabled(model.isRefreshing || hasGitOperationInProgress)
+                    Button("Revert…") { commitToRevert = commit }
+                        .disabled(model.isRefreshing || hasGitOperationInProgress)
+                }
             }
             .padding(.vertical, 2)
+        }
+    }
+
+    private func commitDetailCard(_ commit: GitCommit) -> some View {
+        GroupBox("Commit Detail") {
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(commit.subject)
+                        .font(.headline)
+                    HStack(spacing: 6) {
+                        Text(commit.author)
+                        if let date = commit.authoredAt {
+                            Text("·")
+                            Text(date.formatted(date: .abbreviated, time: .standard))
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    Text(commit.hash)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                Button("Close") { inspectedCommit = nil }
+            }
         }
     }
 
@@ -541,6 +730,10 @@ struct ContentView: View {
 
     private var branchesView: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let intelligence = currentRepositoryIntelligence, isControllableOperation(intelligence.operationMode) {
+                advancedOperationCard(intelligence)
+            }
+
             GroupBox("Branches") {
                 List(model.branches) { branch in
                     HStack(spacing: 10) {
@@ -558,11 +751,23 @@ struct ContentView: View {
                         Button("Worktree…") { model.addWorktree(for: branch) }
                             .disabled(model.isRefreshing || model.worktrees.contains { $0.branch == branch.name })
                         if !branch.isCurrent {
+                            Button("Merge…") {
+                                branchToMerge = branch.name
+                                showMergeConfirmation = true
+                            }
+                            .disabled(model.isRefreshing || hasGitOperationInProgress)
+
+                            Button("Rebase…") {
+                                branchToRebaseOnto = branch.name
+                                showRebaseConfirmation = true
+                            }
+                            .disabled(model.isRefreshing || hasGitOperationInProgress)
+
                             Button("Switch") {
                                 branchToSwitch = branch.name
                                 showBranchConfirmation = true
                             }
-                            .disabled(model.isRefreshing)
+                            .disabled(model.isRefreshing || hasGitOperationInProgress)
                         }
                     }
                     .padding(.vertical, 2)
@@ -613,6 +818,207 @@ struct ContentView: View {
             }
         }
         .padding(.top, 8)
+    }
+
+    private func advancedOperationCard(_ intelligence: GitRepositoryIntelligence) -> some View {
+        GroupBox {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Label(
+                        operationTitle(intelligence.operationMode),
+                        systemImage: intelligence.conflictCount > 0 ? "exclamationmark.triangle.fill" : "arrow.triangle.2.circlepath"
+                    )
+                    .font(.headline)
+
+                    if intelligence.conflictCount > 0 {
+                        Text("Resolve \(intelligence.conflictCount) conflict\(intelligence.conflictCount == 1 ? "" : "s") in the Conflicts workspace before continuing.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Conflicts are resolved. Continue or abort the operation.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer()
+
+                switch intelligence.operationMode {
+                case .merging:
+                    Button("Continue") { model.continueMerge() }
+                        .disabled(model.isRefreshing || intelligence.conflictCount > 0)
+                    Button("Abort", role: .destructive) { model.abortMerge() }
+                        .disabled(model.isRefreshing)
+                case .rebasing:
+                    Button("Continue") { model.continueRebase() }
+                        .disabled(model.isRefreshing || intelligence.conflictCount > 0)
+                    Button("Skip Commit") { model.skipRebaseCommit() }
+                        .disabled(model.isRefreshing)
+                    Button("Abort", role: .destructive) { model.abortRebase() }
+                        .disabled(model.isRefreshing)
+                case .cherryPicking:
+                    Button("Continue") { model.continueCherryPick() }
+                        .disabled(model.isRefreshing || intelligence.conflictCount > 0)
+                    Button("Abort", role: .destructive) { model.abortCherryPick() }
+                        .disabled(model.isRefreshing)
+                case .reverting:
+                    Button("Continue") { model.continueRevert() }
+                        .disabled(model.isRefreshing || intelligence.conflictCount > 0)
+                    Button("Abort", role: .destructive) { model.abortRevert() }
+                        .disabled(model.isRefreshing)
+                case .normal, .bisecting:
+                    EmptyView()
+                }
+            }
+        }
+    }
+
+    private func operationTitle(_ mode: GitRepositoryOperationMode) -> String {
+        switch mode {
+        case .merging: return "Merge in progress"
+        case .rebasing: return "Rebase in progress"
+        case .cherryPicking: return "Cherry-pick in progress"
+        case .reverting: return "Revert in progress"
+        case .bisecting: return "Bisect in progress"
+        case .normal: return "No Git operation in progress"
+        }
+    }
+
+    private var conflictView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Three-way Conflict Workspace")
+                        .font(.headline)
+                    Text("Compare Git's index stages, edit the result, then stage the resolved file.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if !model.conflictedPaths.isEmpty {
+                    Text("\(model.conflictedPaths.count) unresolved")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if model.conflictedPaths.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "checkmark.shield")
+                        .font(.system(size: 30))
+                        .foregroundStyle(.secondary)
+                    Text("No unresolved conflicts")
+                        .font(.headline)
+                    if let intelligence = currentRepositoryIntelligence,
+                       isControllableOperation(intelligence.operationMode) {
+                        Text("The repository operation is still in progress. Continue or abort it below.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        advancedOperationCard(intelligence)
+                            .frame(maxWidth: 680)
+                    } else {
+                        Text("When Git reports a text conflict, BASE / OURS / THEIRS and an editable RESULT appear here.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HSplitView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Conflicted Files")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        List(model.conflictedPaths, id: \.self) { path in
+                            Button {
+                                model.loadConflict(path: path)
+                            } label: {
+                                HStack(spacing: 7) {
+                                    Image(systemName: model.selectedConflictPath == path ? "arrow.right.circle.fill" : "exclamationmark.triangle")
+                                    Text(path)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Spacer()
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(model.isRefreshing || model.isLoadingConflict)
+                        }
+                    }
+                    .frame(minWidth: 180, idealWidth: 220, maxWidth: 280)
+
+                    Group {
+                        if model.isLoadingConflict {
+                            ProgressView("Loading conflict stages…")
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else if let conflict = model.conflictFile {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(conflict.path)
+                                    .font(.callout.weight(.semibold))
+                                    .textSelection(.enabled)
+
+                                HSplitView {
+                                    conflictSide(title: "BASE", text: conflict.base)
+                                    conflictSide(title: "OURS", text: conflict.ours)
+                                    conflictSide(title: "THEIRS", text: conflict.theirs)
+                                }
+                                .frame(minHeight: 150, idealHeight: 210)
+
+                                GroupBox("RESULT") {
+                                    TextEditor(text: $model.conflictResult)
+                                        .font(.system(.body, design: .monospaced))
+                                        .frame(minHeight: 190)
+                                }
+
+                                HStack(spacing: 8) {
+                                    Button("Use BASE") { model.useConflictBase() }
+                                        .disabled(conflict.base == nil || model.isRefreshing)
+                                    Button("Use OURS") { model.useConflictOurs() }
+                                        .disabled(conflict.ours == nil || model.isRefreshing)
+                                    Button("Use THEIRS") { model.useConflictTheirs() }
+                                        .disabled(conflict.theirs == nil || model.isRefreshing)
+                                    Button("Reset") { model.resetConflictResult() }
+                                        .disabled(model.isRefreshing)
+                                    Spacer()
+                                    Button("Resolve & Stage") { model.saveConflictResolution() }
+                                        .keyboardShortcut(.return, modifiers: [.command, .shift])
+                                        .disabled(model.isRefreshing || model.isLoadingConflict)
+                                }
+                            }
+                            .padding(.leading, 8)
+                        } else {
+                            VStack(spacing: 8) {
+                                Image(systemName: "arrow.left.circle")
+                                    .font(.system(size: 28))
+                                    .foregroundStyle(.secondary)
+                                Text("Choose a conflicted file")
+                                    .font(.headline)
+                                Text("Branchlight will read Git's BASE, OURS and THEIRS index stages without invoking an external merge tool.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.top, 8)
+    }
+
+    private func conflictSide(title: String, text: String?) -> some View {
+        GroupBox(title) {
+            ScrollView([.vertical, .horizontal]) {
+                Text(text ?? "Not present in this conflict stage.")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(text == nil ? .secondary : .primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(6)
+            }
+        }
+        .frame(minWidth: 180)
     }
 
     private func isCurrentWorktree(_ worktree: GitWorktree) -> Bool {

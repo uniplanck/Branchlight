@@ -142,6 +142,66 @@ final class SystemGitEngineIntegrationTests: XCTestCase {
         XCTAssertEqual(snapshot.paths.filter { $0.kind == .untracked }.count, 250)
     }
 
+    func testLargeRepositoryStatusLatencyRemainsBounded() throws {
+        let bulk = repositoryURL.appendingPathComponent("large-status-fixture", isDirectory: true)
+        try FileManager.default.createDirectory(at: bulk, withIntermediateDirectories: true)
+        for directoryIndex in 0..<12 {
+            let directory = bulk.appendingPathComponent("dir-\(directoryIndex)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            for fileIndex in 0..<100 {
+                try Data("\(directoryIndex)-\(fileIndex)\n".utf8)
+                    .write(to: directory.appendingPathComponent("file-\(fileIndex).txt"))
+            }
+        }
+
+        let start = Date()
+        let snapshot = try engine.status(at: repositoryURL)
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertEqual(snapshot.paths.filter { $0.kind == .untracked }.count, 1_200)
+        XCTAssertLessThan(
+            elapsed,
+            5.0,
+            "Status for 1,200 untracked paths exceeded the hard regression budget: \(elapsed)s"
+        )
+    }
+
+    func testPathologicalFilenamesRemainLiteralData() throws {
+        let names = [
+            "--help",
+            "semi;colon.txt",
+            "$(touch branchlight-should-not-exist)",
+            "quote'\"name.txt",
+            "line\nbreak.txt",
+            "ユニコード🌲.txt"
+        ]
+        for name in names {
+            try write("literal\n", to: repositoryURL.appendingPathComponent(name))
+        }
+
+        let snapshot = try engine.status(at: repositoryURL)
+        let paths = Set(snapshot.paths.map(\.path))
+        for name in names {
+            XCTAssertTrue(paths.contains(name), "Missing literal pathological path: \(name.debugDescription)")
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: repositoryURL.appendingPathComponent("branchlight-should-not-exist").path
+            )
+        )
+    }
+
+    func testStageRejectsRepositoryEscapePath() throws {
+        let outside = tempDirectory.appendingPathComponent("outside.txt")
+        try write("outside\n", to: outside)
+
+        XCTAssertThrowsError(
+            try engine.stage(at: repositoryURL, paths: ["../outside.txt"])
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path))
+        XCTAssertTrue(try engine.status(at: repositoryURL).isClean)
+    }
+
     func testStageUnstageDiffCommitAndHistory() throws {
         try write("base\nchanged\n", to: repositoryURL.appendingPathComponent("tracked.txt"))
         let unstagedDiff = try engine.diff(at: repositoryURL, paths: ["tracked.txt"], staged: false)
