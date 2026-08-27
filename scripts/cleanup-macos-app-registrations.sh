@@ -124,6 +124,7 @@ if [[ -x "$LSREGISTER" && -n "$HOST_ID" ]]; then
       path:*)
         CURRENT_LS_PATH="${line#path:}"
         CURRENT_LS_PATH="${CURRENT_LS_PATH#"${CURRENT_LS_PATH%%[![:space:]]*}"}"
+        CURRENT_LS_PATH="$(printf '%s\n' "$CURRENT_LS_PATH" | sed -E 's/[[:space:]]+\(0x[0-9A-Fa-f]+\)$//')"
         ;;
       identifier:*)
         CURRENT_LS_ID="${line#identifier:}"
@@ -322,6 +323,7 @@ if [[ -x "$LSREGISTER" && -n "$HOST_ID" ]]; then
       path:*)
         CURRENT_LS_PATH="${line#path:}"
         CURRENT_LS_PATH="${CURRENT_LS_PATH#"${CURRENT_LS_PATH%%[![:space:]]*}"}"
+        CURRENT_LS_PATH="$(printf '%s\n' "$CURRENT_LS_PATH" | sed -E 's/[[:space:]]+\(0x[0-9A-Fa-f]+\)$//')"
         ;;
       identifier:*)
         CURRENT_LS_ID="${line#identifier:}"
@@ -351,5 +353,9 @@ else
 fi
 
 echo
+if [[ -n "$HOST_ID" && "$REMAINING_LS" -gt 1 ]]; then
+  echo "REGISTRATION_CLEANUP_INCOMPLETE remaining_launchservices=$REMAINING_LS" >&2
+  exit 1
+fi
 echo "REGISTRATION_CLEANUP_PASS"
 echo "macOS may ask for this app's permissions once again after the scoped TCC reset."
