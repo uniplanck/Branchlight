@@ -38,10 +38,11 @@ for root in \
   done < <(find "$root" -type d -name "$APP_NAME.app" -prune -print 2>/dev/null || true)
 done
 
+UNIQUE=()
 if [[ "${#CANDIDATES[@]}" -gt 0 ]]; then
-  mapfile -t UNIQUE < <(printf "%s\n" "${CANDIDATES[@]}" | awk '!seen[$0]++')
-else
-  UNIQUE=()
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && UNIQUE+=("$path")
+  done < <(printf "%s\n" "${CANDIDATES[@]}" | awk '!seen[$0]++')
 fi
 
 echo "== Non-canonical app registrations found =="
