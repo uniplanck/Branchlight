@@ -8,7 +8,8 @@ PENDING=0
 
 pass() { printf "PASS    %s\n" "$1"; }
 fail() { printf "FAIL    %s\n" "$1"; FAIL=$((FAIL + 1)); }
-pending() { printf "PENDING %s\n" "$1"; PENDING=$((PENDING + 1)); }
+pending_item() { printf "PENDING %s\n" "$1"; }
+pending_workstream() { printf "PENDING-WORKSTREAM %s\n" "$1"; PENDING=$((PENDING + 1)); }
 
 echo "Branchlight Final Acceptance Doctor"
 echo "App: $APP"
@@ -43,17 +44,26 @@ else
   fail "Git XPC self-contained runpath"
 fi
 
+RELEASE_PENDING=0
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
   pass "Developer ID Application identity installed"
 else
-  pending "Developer ID Application identity not installed"
+  pending_item "Developer ID Application identity not installed"
+  RELEASE_PENDING=1
 fi
 
 PROFILE="${BRANCHLIGHT_NOTARY_KEYCHAIN_PROFILE:-}"
 if [[ -n "$PROFILE" ]]; then
   pass "Notary Keychain profile configured in environment: $PROFILE"
 else
-  pending "BRANCHLIGHT_NOTARY_KEYCHAIN_PROFILE is not set"
+  pending_item "BRANCHLIGHT_NOTARY_KEYCHAIN_PROFILE is not set"
+  RELEASE_PENDING=1
+fi
+
+if [[ "$RELEASE_PENDING" -eq 1 ]]; then
+  pending_workstream "Release signing / notarization"
+else
+  pass "Release signing / notarization prerequisites"
 fi
 
 OAUTH_FILE="$ROOT/Config/Branchlight.oauth.local.xcconfig"
@@ -61,22 +71,33 @@ OAUTH_ID=""
 if [[ -f "$OAUTH_FILE" ]]; then
   OAUTH_ID="$(sed -n 's/^[[:space:]]*BRANCHLIGHT_GITHUB_CLIENT_ID[[:space:]]*=[[:space:]]*//p' "$OAUTH_FILE" | head -n 1 | tr -d '[:space:]')"
 fi
+OAUTH_PENDING=0
 if [[ -n "$OAUTH_ID" ]]; then
   pass "GitHub OAuth Client ID configured locally"
 else
-  pending "GitHub OAuth Client ID is not configured"
+  pending_item "GitHub OAuth Client ID is not configured"
+  OAUTH_PENDING=1
 fi
 
+EMBEDDED_OAUTH=""
 if [[ -f "$APP/Contents/Info.plist" ]]; then
   EMBEDDED_OAUTH="$(/usr/libexec/PlistBuddy -c "Print :BranchlightGitHubClientID" "$APP/Contents/Info.plist" 2>/dev/null || true)"
   if [[ -n "$EMBEDDED_OAUTH" ]]; then
     pass "Installed app contains GitHub OAuth Client ID"
   else
-    pending "Installed app does not yet contain GitHub OAuth Client ID"
+    pending_item "Installed app does not yet contain GitHub OAuth Client ID"
+    OAUTH_PENDING=1
   fi
 fi
 
-pending "VoiceOver real-Mac navigation acceptance must be performed manually once"
+if [[ "$OAUTH_PENDING" -eq 1 ]]; then
+  pending_workstream "GitHub OAuth"
+else
+  pass "GitHub OAuth configuration"
+fi
+
+pending_item "VoiceOver real-Mac navigation acceptance must be performed manually once"
+pending_workstream "VoiceOver real-Mac acceptance"
 
 echo
 if [[ "$FAIL" -gt 0 ]]; then
