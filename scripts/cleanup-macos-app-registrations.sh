@@ -2,16 +2,39 @@
 set -euo pipefail
 
 APP_NAME="${1:-Branchlight}"
-CANONICAL_APP="${2:-/Applications/Branchlight.app}"
-HOST_ID="${3:-com.uniplanck.Branchlight}"
-EXTENSION_ID="${4:-com.uniplanck.Branchlight.Extension}"
+CANONICAL_APP="${2:-/Applications/$APP_NAME.app}"
+HOST_ID="${3:-}"
+EXTENSION_ID="${4:-}"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+if [[ -z "$HOST_ID" && -f "$CANONICAL_APP/Contents/Info.plist" ]]; then
+  HOST_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$CANONICAL_APP/Contents/Info.plist" 2>/dev/null || true)"
+fi
+if [[ -z "$HOST_ID" ]]; then
+  echo "Could not determine the canonical app bundle identifier." >&2
+  exit 64
+fi
+
+EXTENSION_IDS=()
+if [[ -n "$EXTENSION_ID" ]]; then
+  EXTENSION_IDS+=("$EXTENSION_ID")
+elif [[ -d "$CANONICAL_APP/Contents/PlugIns" ]]; then
+  while IFS= read -r appex; do
+    [[ -f "$appex/Contents/Info.plist" ]] || continue
+    id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$appex/Contents/Info.plist" 2>/dev/null || true)"
+    [[ -n "$id" ]] && EXTENSION_IDS+=("$id")
+  done < <(find "$CANONICAL_APP/Contents/PlugIns" -maxdepth 1 -type d -name '*.appex' -print 2>/dev/null || true)
+fi
 
 echo "This cleanup is scoped to:"
 echo "  App: $APP_NAME"
 echo "  Canonical path: $CANONICAL_APP"
 echo "  Bundle ID: $HOST_ID"
-echo "  Extension ID: $EXTENSION_ID"
+if [[ "${#EXTENSION_IDS[@]}" -gt 0 ]]; then
+  printf '  Extension ID: %s\n' "${EXTENSION_IDS[@]}"
+else
+  echo "  Extension ID: none detected"
+fi
 echo
 
 declare -a CANDIDATES=()
@@ -66,7 +89,9 @@ fi
 echo
 echo "== Reset TCC only for this app identity =="
 tccutil reset All "$HOST_ID" 2>/dev/null || true
-tccutil reset All "$EXTENSION_ID" 2>/dev/null || true
+for id in "${EXTENSION_IDS[@]}"; do
+  tccutil reset All "$id" 2>/dev/null || true
+done
 echo "Scoped TCC reset complete. Other apps were not reset."
 
 echo
@@ -75,11 +100,14 @@ if [[ -d "$CANONICAL_APP" ]]; then
   if [[ -x "$LSREGISTER" ]]; then
     "$LSREGISTER" -f "$CANONICAL_APP" >/dev/null 2>&1 || true
   fi
-  EXT="$CANONICAL_APP/Contents/PlugIns/BranchlightFinderExtension.appex"
-  if [[ -d "$EXT" ]]; then
-    pluginkit -r "$EXT" >/dev/null 2>&1 || true
-    pluginkit -a "$EXT"
-    pluginkit -e use -i "$EXTENSION_ID"
+  if [[ -d "$CANONICAL_APP/Contents/PlugIns" ]]; then
+    while IFS= read -r ext; do
+      [[ -d "$ext" ]] || continue
+      pluginkit -r "$ext" >/dev/null 2>&1 || true
+      pluginkit -a "$ext" >/dev/null 2>&1 || true
+      id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$ext/Contents/Info.plist" 2>/dev/null || true)"
+      [[ -n "$id" ]] && pluginkit -e use -i "$id" >/dev/null 2>&1 || true
+    done < <(find "$CANONICAL_APP/Contents/PlugIns" -maxdepth 1 -type d -name '*.appex' -print 2>/dev/null || true)
   fi
 else
   echo "Canonical app not found: $CANONICAL_APP" >&2
