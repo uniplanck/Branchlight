@@ -41,3 +41,6 @@ Config/Branchlight.oauth.local.xcconfig
 *.tmp
 *.swp
 *~
+
+# Local real-Mac acceptance evidence
+.branchlight-local-acceptance/
