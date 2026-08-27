@@ -262,9 +262,9 @@ mkdir -p "$QUARANTINE_DIR"
 
 for path in "${UNIQUE[@]}"; do
   case "$path" in
-    *"/Library/Developer/Xcode/DerivedData/"*|*"/.build/"*|*"/Build/Products/"*)
+    "/private/tmp/"*|*"/Library/Developer/Xcode/DerivedData/"*|*"/.build/"*|*"/Build/Products/"*|*"/build/Debug/"*|*"/build/Release/"*)
       rm -rf "$path"
-      echo "Removed development build copy: $path"
+      echo "Removed development/test build copy: $path"
       ;;
     "/Applications/$APP_NAME.app.backup-"*)
       stamp="$(date +%Y%m%d-%H%M%S)-$RANDOM"
