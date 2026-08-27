@@ -70,6 +70,10 @@ verify_bundle() {
   test -d "$xpc_framework"
   test -f "$xpc_framework/BranchlightCore"
 
+  local xpc_binary="$xpc/Contents/MacOS/BranchlightGitService"
+  otool -L "$xpc_binary" | grep -q '@rpath/BranchlightCore.framework'
+  otool -l "$xpc_binary" | grep -q '@executable_path/../Frameworks'
+
   local host_version host_build extension_version extension_build extension_point
   local xpc_version xpc_build xpc_service_type
   host_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
