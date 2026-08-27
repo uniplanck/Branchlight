@@ -5,6 +5,7 @@ APP_NAME="${1:-Branchlight}"
 CANONICAL_APP="${2:-/Applications/$APP_NAME.app}"
 HOST_ID="${3:-}"
 EXTENSION_ID="${4:-}"
+PURGE_NAME_ONLY=0
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -12,19 +13,93 @@ if [[ -z "$HOST_ID" && -f "$CANONICAL_APP/Contents/Info.plist" ]]; then
   HOST_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$CANONICAL_APP/Contents/Info.plist" 2>/dev/null || true)"
 fi
 if [[ -z "$HOST_ID" ]]; then
-  echo "Could not determine the canonical app bundle identifier." >&2
-  exit 64
+  if [[ ! -d "$CANONICAL_APP" ]]; then
+    PURGE_NAME_ONLY=1
+    echo "Canonical app is not installed at $CANONICAL_APP."
+    echo "Falling back to exact Parent Name cleanup for: $APP_NAME"
+  else
+    echo "Could not determine the canonical app bundle identifier." >&2
+    exit 64
+  fi
 fi
 
 EXTENSION_IDS=()
 if [[ -n "$EXTENSION_ID" ]]; then
   EXTENSION_IDS+=("$EXTENSION_ID")
-elif [[ -d "$CANONICAL_APP/Contents/PlugIns" ]]; then
+elif [[ "$PURGE_NAME_ONLY" -eq 0 && -d "$CANONICAL_APP/Contents/PlugIns" ]]; then
   while IFS= read -r appex; do
     [[ -f "$appex/Contents/Info.plist" ]] || continue
     id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$appex/Contents/Info.plist" 2>/dev/null || true)"
     [[ -n "$id" ]] && EXTENSION_IDS+=("$id")
   done < <(find "$CANONICAL_APP/Contents/PlugIns" -maxdepth 1 -type d -name '*.appex' -print 2>/dev/null || true)
+fi
+
+if [[ "$PURGE_NAME_ONLY" -eq 1 ]]; then
+  echo "== Exact Parent Name plug-in cleanup =="
+  CURRENT_PATH=""
+  CURRENT_PARENT=""
+  MATCHED_PATHS=()
+
+  while IFS= read -r line; do
+    case "$line" in
+      *"Path = "*)
+        CURRENT_PATH="${line#*Path = }"
+        ;;
+      *"Parent Name = "*)
+        CURRENT_PARENT="${line#*Parent Name = }"
+        if [[ "$CURRENT_PARENT" == "$APP_NAME" && -n "$CURRENT_PATH" ]]; then
+          MATCHED_PATHS+=("$CURRENT_PATH")
+        fi
+        ;;
+      "")
+        CURRENT_PATH=""
+        CURRENT_PARENT=""
+        ;;
+    esac
+  done < <(pluginkit -m -A -D -vvv 2>/dev/null || true)
+
+  if [[ "${#MATCHED_PATHS[@]}" -eq 0 ]]; then
+    echo "No registered plug-ins found for exact Parent Name: $APP_NAME"
+  else
+    while IFS= read -r ext; do
+      [[ -n "$ext" ]] || continue
+      echo "Unregistering: $ext"
+      pluginkit -r "$ext" >/dev/null 2>&1 || true
+    done < <(printf "%s\n" "${MATCHED_PATHS[@]}" | awk '!seen[$0]++')
+  fi
+
+  killall pkd >/dev/null 2>&1 || true
+  killall Finder >/dev/null 2>&1 || true
+  killall "System Settings" >/dev/null 2>&1 || true
+  sleep 2
+
+  echo
+  echo "== Remaining exact Parent Name registrations =="
+  REMAINING=0
+  CURRENT_PATH=""
+  CURRENT_PARENT=""
+  while IFS= read -r line; do
+    case "$line" in
+      *"Path = "*) CURRENT_PATH="${line#*Path = }" ;;
+      *"Parent Name = "*)
+        CURRENT_PARENT="${line#*Parent Name = }"
+        if [[ "$CURRENT_PARENT" == "$APP_NAME" && -n "$CURRENT_PATH" ]]; then
+          echo "$CURRENT_PATH"
+          REMAINING=$((REMAINING + 1))
+        fi
+        ;;
+      "") CURRENT_PATH=""; CURRENT_PARENT="" ;;
+    esac
+  done < <(pluginkit -m -A -D -vvv 2>/dev/null || true)
+
+  if [[ "$REMAINING" -eq 0 ]]; then
+    echo "None"
+    echo "REGISTRATION_CLEANUP_PASS name-only"
+    exit 0
+  fi
+
+  echo "REGISTRATION_CLEANUP_INCOMPLETE remaining=$REMAINING" >&2
+  exit 1
 fi
 
 echo "This cleanup is scoped to:"
