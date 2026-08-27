@@ -10,3 +10,8 @@ CODE_SIGN_STYLE = Automatic
 REGISTER_APP_GROUPS = YES
 
 #include? "Branchlight.local.xcconfig"
+
+// Local GitHub OAuth client configuration. Client IDs are not secrets, but the
+// per-machine file keeps contributor setup independent from the canonical project.
+BRANCHLIGHT_GITHUB_CLIENT_ID =
+#include? "Branchlight.oauth.local.xcconfig"
