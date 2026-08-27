@@ -100,6 +100,29 @@ else
 fi
 
 echo
+echo "== Remove disposable stale development copies =="
+QUARANTINE_DIR="$HOME/Library/Caches/$HOST_ID/StaleAppCopies"
+mkdir -p "$QUARANTINE_DIR"
+
+for path in "${UNIQUE[@]}"; do
+  case "$path" in
+    "$HOME/Library/Developer/Xcode/DerivedData/"*)
+      rm -rf "$path"
+      echo "Removed DerivedData copy: $path"
+      ;;
+    "/Applications/$APP_NAME.app.backup-"*)
+      stamp="$(date +%Y%m%d-%H%M%S)-$RANDOM"
+      destination="$QUARANTINE_DIR/$APP_NAME-$stamp.bundle-backup"
+      mv "$path" "$destination"
+      echo "Moved legacy Applications backup out of app search paths: $destination"
+      ;;
+    *)
+      echo "Preserved non-canonical copy after unregister: $path"
+      ;;
+  esac
+done
+
+echo
 echo "== Reset TCC only for this app identity =="
 tccutil reset All "$HOST_ID" 2>/dev/null || true
 for id in "${EXTENSION_IDS[@]}"; do
