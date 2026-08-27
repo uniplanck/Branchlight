@@ -356,8 +356,18 @@ final class GitRecoveryPlannerTests: XCTestCase {
     func testWholePathStageRequiresMatchingPostCheckpoint() {
         let record = makeRecord(
             descriptor: GitOperationDescriptor(intent: .stage, affectedPaths: ["A.swift", "B.swift"]),
-            preCheckpoint: checkpoint(head: "abc", branch: "main", index: "tree-before"),
-            postCheckpoint: checkpoint(head: "abc", branch: "main", index: "tree-after")
+            preCheckpoint: checkpoint(
+                head: "abc",
+                branch: "main",
+                index: "tree-before",
+                exactIndex: "index-before"
+            ),
+            postCheckpoint: checkpoint(
+                head: "abc",
+                branch: "main",
+                index: "tree-after",
+                exactIndex: "index-after"
+            )
         )
         let plan = GitRecoveryPlanner.plan(for: record)
 
@@ -375,13 +385,25 @@ final class GitRecoveryPlannerTests: XCTestCase {
         XCTAssertEqual(GitRecoveryPlanner.plan(for: record).availability, .unavailable)
     }
 
-    func testPatchStageIsUnavailableEvenWithCheckpoint() {
+    func testPatchStageIsRecoverableWithExactIndexCheckpoint() {
         let record = makeRecord(
             descriptor: GitOperationDescriptor(intent: .stage, target: "patch"),
-            preCheckpoint: checkpoint(head: "abc", branch: "main", index: "before"),
-            postCheckpoint: checkpoint(head: "abc", branch: "main", index: "after")
+            preCheckpoint: checkpoint(
+                head: "abc",
+                branch: "main",
+                index: "before",
+                exactIndex: "index-before"
+            ),
+            postCheckpoint: checkpoint(
+                head: "abc",
+                branch: "main",
+                index: "after",
+                exactIndex: "index-after"
+            )
         )
-        XCTAssertEqual(GitRecoveryPlanner.plan(for: record).availability, .unavailable)
+        let plan = GitRecoveryPlanner.plan(for: record)
+        XCTAssertEqual(plan.availability, .validationRequired)
+        XCTAssertEqual(plan.inverseIntent, .unstage)
     }
 
     func testBranchSwitchCanReturnToCheckpointedPreviousBranchAfterValidation() {
@@ -467,12 +489,20 @@ final class GitRecoveryPlannerTests: XCTestCase {
         )
     }
 
-    private func checkpoint(head: String, branch: String, index: String) -> GitRepositoryCheckpoint {
+    private func checkpoint(
+        head: String,
+        branch: String,
+        index: String,
+        exactIndex: String? = nil
+    ) -> GitRepositoryCheckpoint {
         GitRepositoryCheckpoint(
             headCommit: head,
             branch: branch,
             isDetachedHead: false,
             indexTree: index,
+            indexSnapshot: exactIndex.map {
+                GitIndexSnapshot(data: Data($0.utf8), fileMode: 0o100644)
+            },
             operationMode: .normal,
             capturedAt: Date(timeIntervalSince1970: 1)
         )
@@ -575,22 +605,23 @@ final class GitRecoveryValidatorTests: XCTestCase {
         XCTAssertTrue(validation.issues.contains(.operationInProgress))
     }
 
-    func testStageRecoveryRemainsUnsupportedWithoutExactIndexCheckpoint() {
+    func testStageRecoveryIsUnavailableWithoutExactIndexCheckpoint() {
         let record = makeRecord(
             descriptor: GitOperationDescriptor(intent: .stage, affectedPaths: ["A.swift"]),
             pre: checkpoint(head: "abc", branch: "main", index: "before"),
             post: checkpoint(head: "abc", branch: "main", index: "after")
         )
         let plan = GitRecoveryPlanner.plan(for: record)
+        XCTAssertEqual(plan.availability, .unavailable)
+
         let validation = GitRecoveryValidator.validate(
             plan: plan,
             sourceRecord: record,
             currentCheckpoint: checkpoint(head: "abc", branch: "main", index: "after"),
             currentStatus: cleanStatus(branch: "main")
         )
-
         XCTAssertFalse(validation.isValid)
-        XCTAssertTrue(validation.issues.contains(.unsupportedExactIndexRestore))
+        XCTAssertEqual(validation.issues, [.unavailablePlan])
     }
 
     func testMutationAdmissionSeparatesAllowedConfirmationAndBlocked() {
