@@ -57,6 +57,7 @@ verify_bundle() {
   local extension="$app/Contents/PlugIns/BranchlightFinderExtension.appex"
   local xpc="$app/Contents/XPCServices/BranchlightGitService.xpc"
   local framework="$app/Contents/Frameworks/BranchlightCore.framework"
+  local xpc_framework="$xpc/Contents/Frameworks/BranchlightCore.framework"
 
   test -d "$app"
   test -x "$app/Contents/MacOS/Branchlight"
@@ -66,6 +67,8 @@ verify_bundle() {
   test -x "$xpc/Contents/MacOS/BranchlightGitService"
   test -d "$framework"
   test -f "$framework/BranchlightCore"
+  test -d "$xpc_framework"
+  test -f "$xpc_framework/BranchlightCore"
 
   local host_version host_build extension_version extension_build extension_point
   local xpc_version xpc_build xpc_service_type
