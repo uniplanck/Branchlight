@@ -72,10 +72,15 @@ if [[ -d "$APPLICATIONS_APP" ]]; then
   mv "$APPLICATIONS_APP" "$BACKUP"
   echo "Previous app backed up outside LaunchServices-visible app locations: $BACKUP"
 
-  mapfile -t OLD_BACKUPS < <(find "$BACKUP_DIR" -maxdepth 1 -type d -name 'Branchlight-*.bundle-backup' -print | sort -r)
+  OLD_BACKUPS=()
+  while IFS= read -r old; do
+    [[ -n "$old" ]] && OLD_BACKUPS+=("$old")
+  done < <(find "$BACKUP_DIR" -maxdepth 1 -type d -name 'Branchlight-*.bundle-backup' -print | sort -r)
   if [[ "${#OLD_BACKUPS[@]}" -gt 3 ]]; then
-    for old in "${OLD_BACKUPS[@]:3}"; do
-      rm -rf "$old"
+    index=3
+    while [[ "$index" -lt "${#OLD_BACKUPS[@]}" ]]; do
+      rm -rf "${OLD_BACKUPS[$index]}"
+      index=$((index + 1))
     done
   fi
 fi
