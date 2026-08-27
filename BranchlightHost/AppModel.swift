@@ -40,6 +40,7 @@ final class AppModel: ObservableObject {
     private let repositoryResolver: XPCRepositoryResolver
     private let historyMutationService: any GitHistoryMutationService
     private var repositoryWatcher: RepositoryWatcher?
+    private var finderRequestSignalObserver: FinderRequestSignalObserver?
     private var watcherRefreshPending = false
     private var watcherRefreshDrainActive = false
 
@@ -55,6 +56,7 @@ final class AppModel: ObservableObject {
             coordinator: coordinator,
             base: base
         )
+        startObservingFinderRequests()
         Task { await restoreCachedState() }
     }
 
@@ -65,7 +67,16 @@ final class AppModel: ObservableObject {
         self.gitService = gitService
         self.repositoryResolver = XPCRepositoryResolver(fallback: gitService)
         self.historyMutationService = historyMutationService
+        startObservingFinderRequests()
         Task { await restoreCachedState() }
+    }
+
+    private func startObservingFinderRequests() {
+        finderRequestSignalObserver = FinderRequestSignalObserver { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.consumeFinderRequest()
+            }
+        }
     }
 
     private func restoreCachedState() async {
