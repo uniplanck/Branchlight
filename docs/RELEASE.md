@@ -124,3 +124,38 @@ A release is publishable only when all of the following are true:
 - the exact artifact intended for publication is the artifact that passed acceptance.
 
 If any gate is missing, the state is `NOT_RELEASED` rather than an inferred success.
+
+
+## Final acceptance doctor
+
+For a local development machine, run:
+
+```bash
+bash scripts/final-acceptance-doctor.sh
+```
+
+The doctor distinguishes automated failures from external/manual release prerequisites. It checks the installed app signature structure, Finder Extension, Git XPC packaging and runpath, the accessibility source contract, Developer ID identity availability, notarization profile configuration, and local GitHub OAuth client configuration.
+
+A `PENDING` result is not a failure. It means the corresponding credential or real-Mac interaction still has to be supplied by the owner.
+
+## GitHub OAuth local configuration
+
+Branchlight uses GitHub's device authorization flow and never stores a client secret in the application. Configure a GitHub OAuth Client ID locally with:
+
+```bash
+bash scripts/configure-github-oauth.sh <CLIENT_ID>
+```
+
+The generated `Config/Branchlight.oauth.local.xcconfig` is gitignored. The next XcodeGen build embeds only the public Client ID into `Branchlight.app`; access tokens remain Host-Keychain-only.
+
+## Development registration cleanup
+
+Repeated Debug builds can leave stale LaunchServices/TCC registrations on a development Mac. Do not use a global TCC reset. Use the scoped helper instead:
+
+```bash
+bash scripts/cleanup-macos-app-registrations.sh Branchlight /Applications/Branchlight.app
+```
+
+The helper unregisters non-canonical copies, resets TCC only for the detected app/extension bundle identifiers, re-registers the canonical app and extensions, and restarts Finder/System Settings. It does not delete the discovered non-canonical app copies.
+
+The same helper can be used for another local app by supplying its name and canonical `.app` path. Bundle identifiers are read from the canonical bundle when omitted.
