@@ -171,6 +171,7 @@ struct ContentView: View {
             Button("Add Repository…") {
                 model.chooseRepository()
             }
+            .accessibilityIdentifier("branchlight.addRepository")
 
             Button {
                 Task { await model.refresh() }
@@ -181,6 +182,8 @@ struct ContentView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
             }
+            .accessibilityIdentifier("branchlight.refresh")
+            .accessibilityLabel("Refresh repository")
             .disabled(model.repositoryURL == nil || model.isRefreshing)
         }
     }
@@ -302,21 +305,27 @@ struct ContentView: View {
                     model.loadDiff()
                     selectedTab = 1
                 }
+                .accessibilityIdentifier("branchlight.showDiff")
                 .disabled(model.selectedPaths.isEmpty || model.isRefreshing)
 
                 Button("Stage") { model.stageSelected() }
+                    .accessibilityIdentifier("branchlight.stage")
                     .disabled(!model.canStageSelection || model.isRefreshing)
 
                 Button("Unstage") { model.unstageSelected() }
+                    .accessibilityIdentifier("branchlight.unstage")
                     .disabled(!model.canUnstageSelection || model.isRefreshing)
 
                 Spacer()
 
                 Button("Fetch") { model.fetch() }
+                    .accessibilityIdentifier("branchlight.fetch")
                     .disabled(model.isRefreshing)
                 Button("Pull…") { showPullConfirmation = true }
+                    .accessibilityIdentifier("branchlight.pull")
                     .disabled(model.isRefreshing)
                 Button("Push") { model.push() }
+                    .accessibilityIdentifier("branchlight.push")
                     .disabled(model.isRefreshing)
             }
 
@@ -353,7 +362,9 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 TextField("Commit message", text: $model.commitMessage)
                     .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("branchlight.commitMessage")
                 Button("Commit") { model.commit() }
+                    .accessibilityIdentifier("branchlight.commit")
                     .keyboardShortcut(.return, modifiers: [.command])
                     .disabled(!model.hasStagedChanges || model.commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isRefreshing)
             }
